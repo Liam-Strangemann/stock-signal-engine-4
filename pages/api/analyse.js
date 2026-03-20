@@ -1,99 +1,75 @@
 // pages/api/analyse.js
-// Runs server-side on Vercel — no CORS issues, API key is hidden from users
+// Runs server-side on Vercel — no CORS, API key hidden
  
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
 const BASE = 'https://finnhub.io/api/v1';
  
-// ── Finnhub fetch helper ──────────────────────────────────────────────────────
 async function fh(path) {
   const sep = path.includes('?') ? '&' : '?';
   const res = await fetch(`${BASE}${path}${sep}token=${FINNHUB_KEY}`);
-  if (!res.ok) throw new Error(`Finnhub ${res.status}`);
+  if (!res.ok) throw new Error(`Finnhub HTTP ${res.status}`);
   const data = await res.json();
   if (data?.error) throw new Error(data.error);
   return data;
 }
  
-// ── Compute real 50-day MA from Finnhub daily candles ────────────────────────
+// Compute 50-day MA from Finnhub candle data
+// Finnhub returns { c: [closes...], t: [timestamps...], s: "ok" }
 function calc50dMA(candles) {
-  if (!candles || !Array.isArray(candles.c) || candles.c.length < 10) return null;
-  const closes = candles.c; // oldest → newest
-  const last50 = closes.slice(-50);
-  return last50.reduce((a, b) => a + b, 0) / last50.length;
+  if (!candles || candles.s !== 'ok') return null;
+  if (!Array.isArray(candles.c) || candles.c.length < 10) return null;
+  const closes = candles.c;
+  const slice  = closes.slice(-50); // most recent 50 trading days
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
  
-// ── Scrape analyst price target from Macrotrends (public, no key needed) ─────
-// Falls back to Stockanalysis, then Wisesheets summary if first fails
+// Fetch analyst price target — Yahoo Finance first, then scrape fallback
 async function fetchAnalystTarget(ticker) {
-  const sources = [
-    // Macrotrends — has analyst consensus price target in page metadata
-    `https://www.macrotrends.net/stocks/charts/${ticker}/price-target`,
-    // Stockanalysis — clean JSON-like data in page
-    `https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`,
-  ];
- 
-  for (const url of sources) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; StockBot/1.0)',
-          'Accept': 'text/html'
-        },
-        signal: AbortSignal.timeout(5000)
-      });
-      if (!res.ok) continue;
-      const html = await res.text();
- 
-      // Look for price target patterns in the HTML
-      // Pattern 1: "price target" followed by a dollar amount
-      const patterns = [
-        /consensus[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /price\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /analyst[^$]*target[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /target\s+price[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /"targetMeanPrice"[^:]*:\s*([\d.]+)/i,
-        /"priceTarget"[^:]*:\s*([\d.]+)/i,
-        /mean\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /12.month[^$]*\$\s*([\d,]+\.?\d*)/i,
-      ];
- 
-      for (const pattern of patterns) {
-        const match = html.match(pattern);
-        if (match) {
-          const val = parseFloat(match[1].replace(/,/g, ''));
-          if (val > 0 && val < 100000) return val;
-        }
-      }
-    } catch (_) {}
-  }
- 
-  // Final fallback: Yahoo Finance summary page (very reliable)
   try {
     const res = await fetch(
       `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData`,
-      {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        signal: AbortSignal.timeout(5000)
-      }
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000) }
     );
     if (res.ok) {
       const json = await res.json();
-      const target = json?.quoteSummary?.result?.[0]?.financialData?.targetMedianPrice?.raw
-                  || json?.quoteSummary?.result?.[0]?.financialData?.targetMeanPrice?.raw;
-      if (target && target > 0) return target;
+      const fd   = json?.quoteSummary?.result?.[0]?.financialData;
+      const tgt  = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
+      if (tgt && tgt > 0) return tgt;
+    }
+  } catch (_) {}
+ 
+  try {
+    const res = await fetch(
+      `https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000) }
+    );
+    if (res.ok) {
+      const html = await res.text();
+      const patterns = [
+        /price\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
+        /consensus[^$]*\$\s*([\d,]+\.?\d*)/i,
+        /mean\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
+      ];
+      for (const p of patterns) {
+        const m = html.match(p);
+        if (m) {
+          const v = parseFloat(m[1].replace(/,/g, ''));
+          if (v > 0 && v < 100000) return v;
+        }
+      }
     }
   } catch (_) {}
  
   return null;
 }
  
-// ── Fetch all data for one ticker ─────────────────────────────────────────────
 async function fetchStockData(ticker) {
-  const now    = Math.floor(Date.now() / 1000);
-  const ago90  = now - 90 * 24 * 3600;  // 90 days back for 50d MA calc
-  const ago30  = now - 30 * 24 * 3600;  // 30 days back for insider txns
+  // All timestamps must be Unix integer seconds for Finnhub
+  const nowTs  = Math.floor(Date.now() / 1000);
+  const ago100 = nowTs - (100 * 24 * 60 * 60); // 100 days back, plenty for 50d MA
+  const ago30  = nowTs - (30  * 24 * 60 * 60);
   const from30 = new Date(ago30 * 1000).toISOString().slice(0, 10);
-  const to30   = new Date(now   * 1000).toISOString().slice(0, 10);
+  const to30   = new Date(nowTs * 1000).toISOString().slice(0, 10);
  
   const [quote, profile, metrics, earnings, insider, candles, analystTarget] = await Promise.allSettled([
     fh(`/quote?symbol=${ticker}`),
@@ -101,8 +77,9 @@ async function fetchStockData(ticker) {
     fh(`/stock/metric?symbol=${ticker}&metric=all`),
     fh(`/stock/earnings?symbol=${ticker}&limit=4`),
     fh(`/stock/insider-transactions?symbol=${ticker}&from=${from30}&to=${to30}`),
-    fh(`/stock/candle?symbol=${ticker}&resolution=D&from=${ago90}&to=${now}`),
-    fetchAnalystTarget(ticker),  // web scrape — no key needed
+    // Key fix: from and to must be plain integers, not ISO strings
+    fh(`/stock/candle?symbol=${ticker}&resolution=D&from=${ago100}&to=${nowTs}`),
+    fetchAnalystTarget(ticker),
   ]);
  
   return {
@@ -116,7 +93,16 @@ async function fetchStockData(ticker) {
   };
 }
  
-// ── Evaluate all 5 signals ────────────────────────────────────────────────────
+// Overall rating derived from score out of 5
+function getRating(score) {
+  if (score === 5) return { label: 'Strong buy', color: '#14532d', bg: '#dcfce7', border: '#86efac' };
+  if (score === 4) return { label: 'Buy',         color: '#15803d', bg: '#f0fdf4', border: '#bbf7d0' };
+  if (score === 3) return { label: 'Watch',       color: '#92400e', bg: '#fffbeb', border: '#fde68a' };
+  if (score === 2) return { label: 'Weak',        color: '#9a3412', bg: '#fff7ed', border: '#fdba74' };
+  if (score === 1) return { label: 'Avoid',       color: '#991b1b', bg: '#fef2f2', border: '#fca5a5' };
+  return             { label: 'Ignore',           color: '#6b7280', bg: '#f9fafb', border: '#d1d5db' };
+}
+ 
 function evaluate(ticker, d) {
   const q   = d.quote   || {};
   const p   = d.profile || {};
@@ -130,7 +116,7 @@ function evaluate(ticker, d) {
             : mc > 1e9  ? `$${(mc/1e9).toFixed(1)}B`
             : mc > 1e6  ? `$${(mc/1e6).toFixed(0)}M` : '';
  
-  // ── Signal 1: EPS beat ──────────────────────────────────────────────────────
+  // Signal 1 — EPS beat
   let s1 = { status: 'neutral', value: 'No data' };
   try {
     const earns = Array.isArray(d.earnings) ? d.earnings : [];
@@ -144,7 +130,7 @@ function evaluate(ticker, d) {
     }
   } catch(_) {}
  
-  // ── Signal 2: PE vs historical average ─────────────────────────────────────
+  // Signal 2 — PE vs historical average (52wk midpoint / EPS as proxy)
   let s2 = { status: 'neutral', value: 'No data' };
   try {
     const curPE = m.peBasicExclExtraTTM || m.peTTM;
@@ -153,21 +139,18 @@ function evaluate(ticker, d) {
     const lo    = m['52WeekLow'];
     if (curPE && eps > 0 && hi && lo) {
       const histPE = ((hi + lo) / 2) / eps;
-      if (curPE < histPE * 0.92)
-        s2 = { status: 'pass',    value: `PE ${curPE.toFixed(1)}x < hist ~${histPE.toFixed(0)}x` };
-      else if (curPE > histPE * 1.08)
-        s2 = { status: 'fail',    value: `PE ${curPE.toFixed(1)}x > hist ~${histPE.toFixed(0)}x` };
-      else
-        s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x` };
+      if      (curPE < histPE * 0.92) s2 = { status: 'pass',    value: `PE ${curPE.toFixed(1)}x < hist ~${histPE.toFixed(0)}x` };
+      else if (curPE > histPE * 1.08) s2 = { status: 'fail',    value: `PE ${curPE.toFixed(1)}x > hist ~${histPE.toFixed(0)}x` };
+      else                            s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x` };
     } else if (curPE) {
       s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x` };
     }
   } catch(_) {}
  
-  // ── Signal 3: Price vs real 50-day MA (computed from daily candles) ─────────
+  // Signal 3 — Price vs real 50-day MA calculated from daily candle history
   let s3 = { status: 'neutral', value: 'No data' };
   try {
-    const ma50 = calc50dMA(d.candles);   // computed from real price history
+    const ma50 = calc50dMA(d.candles);
     if (ma50 && curPx) {
       const pct = ((curPx - ma50) / ma50 * 100).toFixed(1);
       s3 = curPx <= ma50
@@ -176,27 +159,24 @@ function evaluate(ticker, d) {
     }
   } catch(_) {}
  
-  // ── Signal 4: Insider buying last 30 days ───────────────────────────────────
+  // Signal 4 — Insider buying last 30 days
   let s4 = { status: 'neutral', value: 'No data' };
   try {
     const txns = d.insider?.data || [];
     const buys  = txns.filter(t => t.transactionCode === 'P');
     const sells = txns.filter(t => t.transactionCode === 'S');
-    const bv = buys.reduce((s, t) => s + Math.abs((t.share||0) * (t.transactionPrice||curPx||0)), 0);
+    const bv    = buys.reduce((s, t) => s + Math.abs((t.share||0) * (t.transactionPrice||curPx||0)), 0);
     if (buys.length > 0) {
-      const fv = bv > 1e6 ? `$${(bv/1e6).toFixed(1)}M`
-               : bv > 1e3 ? `$${(bv/1e3).toFixed(0)}K`
-               : `$${bv.toFixed(0)}`;
-      s4 = { status: 'pass', value: `${buys.length} buy${buys.length>1?'s':''} ≈ ${fv}` };
+      const fv = bv > 1e6 ? `$${(bv/1e6).toFixed(1)}M` : bv > 1e3 ? `$${(bv/1e3).toFixed(0)}K` : `$${bv.toFixed(0)}`;
+      s4 = { status: 'pass', value: `${buys.length} buy${buys.length > 1 ? 's' : ''} ≈ ${fv}` };
     } else if (sells.length > 0) {
-      s4 = { status: 'fail', value: `${sells.length} sell${sells.length>1?'s':''}, no buys` };
+      s4 = { status: 'fail', value: `${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys` };
     } else {
       s4 = { status: 'neutral', value: 'No insider txns (30d)' };
     }
   } catch(_) {}
  
-  // ── Signal 5: Analyst price target ≥ +25% above current price ──────────────
-  // Target comes from web scrape — much more reliable than Finnhub free tier
+  // Signal 5 — Analyst price target ≥ +25% above current stock price
   let s5 = { status: 'neutral', value: 'No data' };
   try {
     const tgt = d.analystTarget;
@@ -211,17 +191,15 @@ function evaluate(ticker, d) {
   const signals = [s1, s2, s3, s4, s5];
   const score   = signals.filter(s => s.status === 'pass').length;
   const passes  = signals.map((s, i) => s.status === 'pass'
-    ? ['EPS beat', 'Low PE', 'Below 50d MA', 'Insider buying', 'Analyst upside'][i]
-    : null).filter(Boolean);
-  const fails = signals.map((s, i) => s.status === 'fail'
-    ? ['EPS beat', 'Low PE', 'Below 50d MA', 'Insider buying', 'Analyst upside'][i]
-    : null).filter(Boolean);
+    ? ['EPS beat', 'Low PE', 'Below 50d MA', 'Insider buying', 'Analyst upside'][i] : null).filter(Boolean);
+  const fails   = signals.map((s, i) => s.status === 'fail'
+    ? ['EPS beat', 'Low PE', 'Below 50d MA', 'Insider buying', 'Analyst upside'][i] : null).filter(Boolean);
  
   let summary;
   if (score >= 4)       summary = `Strong value candidate — ${score}/5 signals pass. Strengths: ${passes.join(', ')}.`;
   else if (score === 3) summary = `Moderate signals (3/5). Passes: ${passes.join(', ')}.`;
   else if (score > 0)   summary = `Weak signals (${score}/5). Fails: ${fails.join(', ')}.`;
-  else                  summary = `No signals pass currently. Fails: ${fails.join(', ')}.`;
+  else                  summary = `No signals pass. Fails: ${fails.join(', ')}.`;
  
   return {
     ticker, company,
@@ -229,11 +207,11 @@ function evaluate(ticker, d) {
     change:    q.dp != null ? `${q.dp > 0 ? '+' : ''}${q.dp.toFixed(2)}%` : null,
     marketCap: mcs,
     score, signals, summary,
+    rating:    getRating(score),
     updatedAt: new Date().toISOString()
   };
 }
  
-// ── API route handler ─────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   if (req.method !== 'POST')
     return res.status(405).json({ error: 'Method not allowed' });
