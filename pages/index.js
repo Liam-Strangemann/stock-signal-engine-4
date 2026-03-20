@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Head from 'next/head';
-
+ 
 const PRESETS = {
   'Mega-cap':    'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH',
   'Tech':        'AAPL,MSFT,NVDA,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT',
@@ -11,11 +11,11 @@ const PRESETS = {
   'International':'TSM,ASML,NVO,SAP,TM,SHEL,BHP,RIO,AZN,HSBC',
   'Dividend':    'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
-
+ 
 const SIG_LABELS = ['EPS & Rev beat', 'PE vs hist avg', 'Price vs 50d MA', 'Insider buying', 'Analyst +25% upside'];
-
+ 
 const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,GM,F,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,WBA'.split(','));
-
+ 
 function ScoreBar({ score }) {
   const colors = ['#f87171','#f87171','#fb923c','#fbbf24','#4ade80','#4ade80'];
   return (
@@ -29,7 +29,7 @@ function ScoreBar({ score }) {
     </div>
   );
 }
-
+ 
 function SigBadge({ sig }) {
   const bg    = sig.status === 'pass' ? '#EAF3DE' : sig.status === 'fail' ? '#FCEBEB' : '#18181c';
   const color = sig.status === 'pass' ? '#27500A' : sig.status === 'fail' ? '#A32D2D' : '#666';
@@ -43,7 +43,7 @@ function SigBadge({ sig }) {
     </div>
   );
 }
-
+ 
 function StockCard({ stock, rank }) {
   const sc = Math.min(stock.score || 0, 5);
   const barColor = sc >= 4 ? '#4ade80' : sc === 3 ? '#fbbf24' : sc === 2 ? '#fb923c' : '#f87171';
@@ -51,9 +51,19 @@ function StockCard({ stock, rank }) {
                  : rank === 2 ? { background:'#F1EFE8', border:'0.5px solid #D3D1C7', color:'#444441' }
                  : rank === 3 ? { background:'#FAECE7', border:'0.5px solid #F5C4B3', color:'#712B13' }
                  : { background:'#18181c', border:'0.5px solid #2a2a30', color:'#666' };
-  const isUS = US_SET.has(stock.ticker);
+  const isUS   = US_SET.has(stock.ticker);
   const chgPos = stock.change && stock.change.startsWith('+');
-
+ 
+  // Rating badge — comes from API, falls back to deriving from score
+  const rating = stock.rating || (() => {
+    if (sc === 5) return { label:'Strong buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
+    if (sc === 4) return { label:'Buy',        color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' };
+    if (sc === 3) return { label:'Watch',      color:'#92400e', bg:'#fffbeb', border:'#fde68a' };
+    if (sc === 2) return { label:'Ignore',     color:'#6b7280', bg:'#f9fafb', border:'#d1d5db' };
+    if (sc === 1) return { label:'Ignore',     color:'#6b7280', bg:'#f9fafb', border:'#d1d5db' };
+    return               { label:'Ignore',     color:'#6b7280', bg:'#f9fafb', border:'#d1d5db' };
+  })();
+ 
   return (
     <div style={{
       background: '#111114', border: '0.5px solid #1f1f26',
@@ -66,13 +76,23 @@ function StockCard({ stock, rank }) {
             {rank}
           </div>
           <div>
-            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
               <span style={{ fontSize:16, fontWeight:500, fontFamily:'monospace', letterSpacing:0.3 }}>{stock.ticker}</span>
               <span style={{ fontSize:9, fontFamily:'monospace', padding:'2px 5px', borderRadius:4,
                 background: isUS ? '#E6F1FB' : '#FAEEDA',
                 color: isUS ? '#0C447C' : '#633806',
                 border: isUS ? '0.5px solid #B5D4F4' : '0.5px solid #FAC775' }}>
                 {isUS ? 'US' : 'INTL'}
+              </span>
+              {/* ── Rating badge ── */}
+              <span style={{
+                fontSize: 10, fontWeight: 600, letterSpacing: 0.4,
+                padding: '3px 8px', borderRadius: 20,
+                background: rating.bg, color: rating.color,
+                border: `0.5px solid ${rating.border}`,
+                textTransform: 'uppercase'
+              }}>
+                {rating.label}
               </span>
             </div>
             <div style={{ fontSize:12, color:'#666', marginTop:2 }}>{stock.company}</div>
@@ -93,14 +113,14 @@ function StockCard({ stock, rank }) {
           <ScoreBar score={sc}/>
         </div>
       </div>
-
+ 
       <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:4, marginBottom:8 }}>
         {SIG_LABELS.map((label, i) => {
           const sig = (stock.signals || [])[i] || {};
           return <SigBadge key={i} sig={{ ...sig, label }}/>;
         })}
       </div>
-
+ 
       {stock.summary && (
         <div style={{ fontSize:12, color:'#a1a0aa', borderTop:'0.5px solid #1f1f26', paddingTop:8, lineHeight:1.55 }}>
           {stock.summary}
@@ -117,7 +137,7 @@ function StockCard({ stock, rank }) {
     </div>
   );
 }
-
+ 
 export default function Home() {
   const [input, setInput]         = useState('');
   const [results, setResults]     = useState([]);
@@ -129,7 +149,7 @@ export default function Home() {
   const [activePreset, setActivePreset] = useState('');
   const timerRef = useRef(null);
   const tickersRef = useRef([]);
-
+ 
   const scan = useCallback(async (tickers) => {
     setScanning(true);
     setStatus(`Fetching data for ${tickers.length} stocks…`);
@@ -159,7 +179,7 @@ export default function Home() {
       setTimeout(() => setProgress(0), 1000);
     }
   }, []);
-
+ 
   const runScan = () => {
     const tickers = input.split(/[\s,;]+/).map(t => t.toUpperCase().trim()).filter(Boolean).slice(0, 20);
     if (!tickers.length) return;
@@ -169,13 +189,13 @@ export default function Home() {
     scan(tickers);
     timerRef.current = setInterval(() => scan(tickersRef.current), 5 * 60 * 1000);
   };
-
+ 
   const doRefresh = () => {
     if (tickersRef.current.length) scan(tickersRef.current);
   };
-
+ 
   useEffect(() => () => clearInterval(timerRef.current), []);
-
+ 
   const filtered = results.filter(r => {
     if (filter === 'strong') return (r.score || 0) >= 4;
     if (filter === 'mod')    return (r.score || 0) === 3;
@@ -184,14 +204,14 @@ export default function Home() {
     if (filter === 'intl')   return !US_SET.has(r.ticker);
     return true;
   });
-
+ 
   const stats = {
     total:    results.filter(r => r.score != null).length,
     strong:   results.filter(r => (r.score || 0) >= 4).length,
     moderate: results.filter(r => (r.score || 0) === 3).length,
     avg:      results.length ? (results.reduce((s, r) => s + (r.score||0), 0) / results.length).toFixed(1) : '—'
   };
-
+ 
   function exportCSV() {
     const hdr = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS_Beat','PE_hist','vs50dMA','Insider','Analyst_Upside','Summary'];
     const rows = filtered.map((r, i) => {
@@ -208,7 +228,7 @@ export default function Home() {
     a.download = `signals_${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
   }
-
+ 
   return (
     <>
       <Head>
@@ -216,12 +236,12 @@ export default function Home() {
         <meta name="description" content="5-factor undervalue stock scanner" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
-
+ 
       <div style={{ background:'#09090b', minHeight:'100vh', color:'#f0eff4', fontFamily:"'DM Sans', sans-serif", fontSize:14 }}>
         <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-
+ 
         <div style={{ maxWidth:1100, margin:'0 auto', padding:'2rem 1.25rem 5rem' }}>
-
+ 
           {/* Header */}
           <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', flexWrap:'wrap', gap:12, marginBottom:'2rem' }}>
             <div style={{ display:'flex', alignItems:'center', gap:12 }}>
@@ -242,7 +262,7 @@ export default function Home() {
               <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
             </div>
           </div>
-
+ 
           {/* Stats */}
           <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8, marginBottom:'1.5rem' }}>
             {[
@@ -257,14 +277,14 @@ export default function Home() {
               </div>
             ))}
           </div>
-
+ 
           {/* Progress bar */}
           {scanning && (
             <div style={{ height:3, background:'#1f1f26', borderRadius:2, marginBottom:12, overflow:'hidden' }}>
               <div style={{ height:'100%', background:'#7c6af7', borderRadius:2, width:`${progress}%`, transition:'width .4s' }}/>
             </div>
           )}
-
+ 
           {/* Controls */}
           <div style={{ background:'#111114', border:'0.5px solid #1f1f26', borderRadius:12, padding:'1.125rem 1.25rem', marginBottom:'1.125rem' }}>
             <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', marginBottom:10 }}>
@@ -303,7 +323,7 @@ export default function Home() {
               ))}
             </div>
           </div>
-
+ 
           {/* Filters */}
           <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center', marginBottom:'.875rem' }}>
             <span style={{ fontSize:11, color:'#5a5966' }}>filter:</span>
@@ -317,7 +337,7 @@ export default function Home() {
               </button>
             ))}
           </div>
-
+ 
           {/* Status */}
           {status && (
             <div style={{ fontSize:12, color: status.startsWith('Error') ? '#f87171' : '#5a5966', fontFamily:'monospace', marginBottom:'.875rem', display:'flex', alignItems:'center', gap:8 }}>
@@ -326,7 +346,7 @@ export default function Home() {
               {status}
             </div>
           )}
-
+ 
           {/* Grid */}
           {filtered.length === 0 && !scanning ? (
             <div style={{ textAlign:'center', padding:'3rem 1rem', color:'#5a5966', fontFamily:'monospace', fontSize:13 }}>
@@ -337,7 +357,7 @@ export default function Home() {
               {filtered.map((stock, i) => <StockCard key={stock.ticker} stock={stock} rank={i+1}/>)}
             </div>
           )}
-
+ 
           {/* Export */}
           {results.length > 0 && (
             <div style={{ display:'flex', gap:8, marginTop:'1.5rem', paddingTop:'1.25rem', borderTop:'0.5px solid #1f1f26', flexWrap:'wrap', alignItems:'center' }}>
@@ -349,9 +369,10 @@ export default function Home() {
               }} style={{ padding:'7px 14px', borderRadius:8, fontSize:13, cursor:'pointer', background:'transparent', border:'0.5px solid #2a2a30', color:'#a1a0aa' }}>↓ Export JSON</button>
             </div>
           )}
-
+ 
         </div>
       </div>
     </>
   );
 }
+ 
