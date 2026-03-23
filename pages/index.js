@@ -20,7 +20,7 @@ function ScoreBar({ score }) {
   const colors = ['#f87171','#f87171','#fb923c','#fbbf24','#4ade80','#4ade80'];
   return (
     <div style={{ display:'flex', gap:3 }}>
-      {[0,1,2,3,4].map(function(i) {
+      {[0,1,2,3,4,5].map(function(i) {
         return <div key={i} style={{ width:8, height:8, borderRadius:'50%', background: i < score ? colors[score] : '#2a2a30' }}/>;
       })}
     </div>
@@ -94,7 +94,7 @@ function StockCard({ stock, rank }) {
   var isUS   = US_SET.has(stock.ticker);
   var chgPos = stock.change && stock.change.startsWith('+');
   var rating = stock.rating || (function() {
-    if (sc === 5) return { label:'Strong buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
+    if (sc >= 5) return { label:'Strong buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
     if (sc === 4) return { label:'Buy',        color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' };
     if (sc === 3) return { label:'Watch',      color:'#92400e', bg:'#fffbeb', border:'#fde68a' };
     return               { label:'Ignore',     color:'#6b7280', bg:'#f9fafb', border:'#d1d5db' };
@@ -129,7 +129,7 @@ function StockCard({ stock, rank }) {
         </div>
         <div style={{ textAlign:'right', flexShrink:0 }}>
           <div style={{ fontSize:26, fontWeight:500, fontFamily:'monospace', color: sc>=4 ? '#4ade80' : sc===3 ? '#fbbf24' : sc===2 ? '#fb923c' : '#f87171' }}>
-            {sc}<span style={{ fontSize:13, opacity:0.4 }}>/5</span>
+            {sc}<span style={{ fontSize:13, opacity:0.4 }}>/6</span>
           </div>
           <ScoreBar score={sc}/>
         </div>
@@ -160,10 +160,90 @@ function StockCard({ stock, rank }) {
   );
 }
  
+ 
+function Top3Bar({ top3Data, loading }) {
+  var containerStyle = {
+    position: 'fixed',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    background: '#0d0d10',
+    borderTop: '0.5px solid #2a2a30',
+    padding: '10px 20px',
+    zIndex: 100,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    flexWrap: 'wrap'
+  };
+  var labelStyle = {
+    fontSize: 10,
+    color: '#5a5966',
+    fontFamily: 'monospace',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    flexShrink: 0,
+    whiteSpace: 'nowrap'
+  };
+  if (loading) {
+    return (
+      <div style={containerStyle}>
+        <span style={labelStyle}>Top 3 of the day</span>
+        <span style={{ fontSize:11, color:'#444', fontFamily:'monospace' }}>Scanning watchlist...</span>
+      </div>
+    );
+  }
+  if (!top3Data || !top3Data.top3 || top3Data.top3.length === 0) {
+    return (
+      <div style={containerStyle}>
+        <span style={labelStyle}>Top 3 of the day</span>
+        <span style={{ fontSize:11, color:'#444', fontFamily:'monospace' }}>No data yet</span>
+      </div>
+    );
+  }
+  var medals = ['#FFD700','#C0C0C0','#CD7F32'];
+  var scannedAt = top3Data.scannedAt ? new Date(top3Data.scannedAt).toLocaleTimeString() : '';
+  var total = top3Data.totalScanned || 0;
+  return (
+    <div style={containerStyle}>
+      <span style={labelStyle}>{'Top 3 today (' + total + ' scanned' + (scannedAt ? ', ' + scannedAt : '') + ')'}</span>
+      {top3Data.top3.map(function(stock, i) {
+        var chgPos = stock.change && stock.change.startsWith('+');
+        return (
+          <div key={stock.ticker} style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: '#111114', border: '0.5px solid #2a2a30',
+            borderRadius: 8, padding: '5px 10px', flexShrink: 0
+          }}>
+            <span style={{ fontSize:12, color: medals[i] }}>{'#' + (i+1)}</span>
+            <span style={{ fontSize:13, fontWeight:500, fontFamily:'monospace', color:'#f0eff4' }}>{stock.ticker}</span>
+            <span style={{ fontSize:11, fontFamily:'monospace', color:'#888' }}>{stock.price}</span>
+            {stock.change && (
+              <span style={{ fontSize:10, fontFamily:'monospace', color: chgPos ? '#4ade80' : '#f87171' }}>{stock.change}</span>
+            )}
+            <span style={{
+              fontSize: 10, fontFamily: 'monospace', fontWeight: 600,
+              padding: '2px 6px', borderRadius: 20,
+              background: stock.score >= 3 ? '#EAF3DE' : '#FCEBEB',
+              color: stock.score >= 3 ? '#27500A' : '#A32D2D'
+            }}>{stock.score + '/4'}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+ 
 export default function Home() {
   var inputState    = useState('');
   var input         = inputState[0];
   var setInput      = inputState[1];
+  var top3State     = useState(null);
+  var top3          = top3State[0];
+  var setTop3       = top3State[1];
+  var top3LoadState = useState(false);
+  var top3Loading   = top3LoadState[0];
+  var setTop3Loading = top3LoadState[1];
   var resultsState  = useState([]);
   var results       = resultsState[0];
   var setResults    = resultsState[1];
@@ -235,6 +315,15 @@ export default function Home() {
     return function() { clearInterval(timerRef.current); };
   }, []);
  
+  useEffect(function() {
+    setTop3Loading(true);
+    fetch('/api/top3')
+      .then(function(r) { return r.json(); })
+      .then(function(d) { if (d.top3) setTop3(d); })
+      .catch(function() {})
+      .finally(function() { setTop3Loading(false); });
+  }, []);
+ 
   var filtered = results.filter(function(r) {
     if (filter === 'strong') return (r.score||0) >= 4;
     if (filter === 'mod')    return (r.score||0) === 3;
@@ -299,7 +388,7 @@ export default function Home() {
       </Head>
       <div style={{ background:'#09090b', minHeight:'100vh', color:'#f0eff4', fontFamily:"'DM Sans', sans-serif", fontSize:14 }}>
         <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-        <div style={{ maxWidth:1100, margin:'0 auto', padding:'2rem 1.25rem 5rem' }}>
+        <div style={{ maxWidth:1100, margin:'0 auto', padding:'2rem 1.25rem 8rem' }}>
  
           <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', flexWrap:'wrap', gap:12, marginBottom:'2rem' }}>
             <div style={{ display:'flex', alignItems:'center', gap:12 }}>
@@ -323,7 +412,7 @@ export default function Home() {
           <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8, marginBottom:'1.5rem' }}>
             {[
               { label:'Scanned',      val: stats.total,    color: null },
-              { label:'Strong (4-5)', val: stats.strong,   color: '#4ade80' },
+              { label:'Strong (5-6)', val: stats.strong,   color: '#4ade80' },
               { label:'Moderate (3)', val: stats.moderate, color: '#fbbf24' },
               { label:'Avg score',    val: stats.avg,      color: null },
             ].map(function(s) {
@@ -383,7 +472,7 @@ export default function Home() {
  
           <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center', marginBottom:'0.875rem' }}>
             <span style={{ fontSize:11, color:'#5a5966' }}>filter:</span>
-            {[['all','All'],['strong','Strong 4-5'],['mod','Moderate 3'],['weak','Weak 0-2'],['us','US only'],['intl','International']].map(function(kl) {
+            {[['all','All'],['strong','Strong 5-6'],['mod','Moderate 3'],['weak','Weak 0-2'],['us','US only'],['intl','International']].map(function(kl) {
               return (
                 <button key={kl[0]} onClick={function() { setFilter(kl[0]); }}
                   style={{ padding:'3px 10px', borderRadius:6, fontSize:11, cursor:'pointer',
@@ -429,6 +518,7 @@ export default function Home() {
  
         </div>
       </div>
+      <Top3Bar top3Data={top3} loading={top3Loading} />
     </>
   );
 }
