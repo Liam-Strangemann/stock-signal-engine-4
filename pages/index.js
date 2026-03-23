@@ -424,7 +424,7 @@ export default function Home() {
           {/* -- Top 3 Picks -- */}
           <div style={{ marginBottom: 40 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 20 }}>
-              <h2 style={{ fontSize: 42, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em' }}>
+              <h2 style={{ fontSize: 36, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em' }}>
                 Top Picks Today
               </h2>
               <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
@@ -468,7 +468,7 @@ export default function Home() {
  
           {/* -- Divider -- */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 32 }}>
-            <h2 style={{ fontSize: 42, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
+            <h2 style={{ fontSize: 36, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
               Custom Scan
             </h2>
             <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
