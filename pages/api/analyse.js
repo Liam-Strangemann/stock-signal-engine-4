@@ -242,13 +242,32 @@ function buildInsiderValue(buys, sells, source) {
 }
  
 // ── Peer PE comparison ────────────────────────────────────────────────────────
-// Fetches peer tickers from Finnhub, then pulls PE + financials for each,
-// filters to truly comparable companies, returns peer median PE and diff%
+// ── Peer PE comparison ────────────────────────────────────────────────────────
+// NOTE: Finnhub marketCapitalization in /stock/metric is in MILLIONS already
+// So targetMC passed in must also be in millions (no *1e6)
 async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
   try {
-    // Step 1: get stock peers from Finnhub
-    const peersData = await fh(`/stock/peers?symbol=${ticker}`);
-    const rawPeers  = Array.isArray(peersData) ? peersData.filter(p=>p!==ticker).slice(0,15) : [];
+    // Step 1: get peer tickers — Finnhub first, Yahoo Finance as fallback
+    let rawPeers = [];
+    try {
+      const pd = await fh(`/stock/peers?symbol=${ticker}`);
+      if (Array.isArray(pd)) rawPeers = pd.filter(p => p !== ticker).slice(0, 15);
+    } catch (_) {}
+ 
+    if (rawPeers.length < 3) {
+      try {
+        const r = await fetch(
+          `https://query1.finance.yahoo.com/v6/finance/recommendationsbysymbol/${ticker}`,
+          { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000) }
+        );
+        if (r.ok) {
+          const j      = await r.json();
+          const yPeers = (j?.finance?.result?.[0]?.recommendedSymbols || []).map(s => s.symbol);
+          rawPeers = [...new Set([...rawPeers, ...yPeers])].filter(p => p !== ticker).slice(0, 15);
+        }
+      } catch (_) {}
+    }
+ 
     if (rawPeers.length === 0) return null;
  
     // Step 2: fetch metrics for each peer in parallel
@@ -257,44 +276,47 @@ async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
     );
  
     const comparables = [];
-    for (let i=0; i<rawPeers.length; i++) {
+    for (let i = 0; i < rawPeers.length; i++) {
       if (peerMetrics[i].status !== 'fulfilled') continue;
       const pm  = peerMetrics[i].value?.metric || {};
       const pe  = pm.peBasicExclExtraTTM || pm.peTTM;
-      const mc  = (peerMetrics[i].value?.metric?.marketCapitalization || 0) * 1e6;
+      // marketCapitalization from Finnhub metric is already in MILLIONS — no conversion needed
+      const mc  = pm.marketCapitalization || 0;
       const npm = pm.netProfitMarginAnnual || pm.netProfitMarginTTM;
  
-      // Filter: must have positive PE, similar market cap (0.25x–4x), not wildly different margin
       if (!pe || pe <= 0 || pe > 200) continue;
+ 
+      // Market cap filter: 0.25x–4x of target (both values are in millions)
       if (targetMC > 0 && mc > 0) {
         const ratio = mc / targetMC;
-        if (ratio < 0.25 || ratio > 4) continue; // tighter comparable market cap range
+        if (ratio < 0.25 || ratio > 4) continue;
       }
-      // Filter out companies with negative margins if target is profitable
+ 
       if (targetMargin > 0 && npm !== null && npm < -5) continue;
-      // Remove obvious PE outliers (> 3 std devs handled after collection)
       comparables.push({ ticker: rawPeers[i], pe, mc, npm });
     }
  
     if (comparables.length < 2) return null;
  
-    // Step 3: remove outliers using IQR method
-    const pes    = comparables.map(c=>c.pe).sort((a,b)=>a-b);
-    const q1     = pes[Math.floor(pes.length*0.25)];
-    const q3     = pes[Math.floor(pes.length*0.75)];
-    const iqr    = q3 - q1;
-    const clean  = comparables.filter(c => c.pe >= q1-1.5*iqr && c.pe <= q3+1.5*iqr);
+    // Step 3: remove PE outliers via IQR
+    const pes   = comparables.map(c => c.pe).sort((a, b) => a - b);
+    const q1    = pes[Math.floor(pes.length * 0.25)];
+    const q3    = pes[Math.floor(pes.length * 0.75)];
+    const iqr   = q3 - q1;
+    const clean = comparables.filter(c => c.pe >= q1 - 1.5 * iqr && c.pe <= q3 + 1.5 * iqr);
     if (clean.length < 2) return null;
  
-    // Step 4: calculate median PE
-    const cleanPes   = clean.map(c=>c.pe).sort((a,b)=>a-b);
-    const mid        = Math.floor(cleanPes.length/2);
-    const medianPE   = cleanPes.length%2 === 0
-      ? (cleanPes[mid-1]+cleanPes[mid])/2
+    // Step 4: median + average
+    const cleanPes = clean.map(c => c.pe).sort((a, b) => a - b);
+    const mid      = Math.floor(cleanPes.length / 2);
+    const medianPE = cleanPes.length % 2 === 0
+      ? (cleanPes[mid - 1] + cleanPes[mid]) / 2
       : cleanPes[mid];
-    const avgPE      = cleanPes.reduce((a,b)=>a+b,0)/cleanPes.length;
+    const avgPE = cleanPes.reduce((a, b) => a + b, 0) / cleanPes.length;
  
-    if (!targetPE || targetPE <= 0) return { medianPE, avgPE, peerCount:clean.length, diff:null, peers:clean.map(c=>c.ticker) };
+    if (!targetPE || targetPE <= 0) {
+      return { medianPE: parseFloat(medianPE.toFixed(1)), avgPE: parseFloat(avgPE.toFixed(1)), peerCount: clean.length, diff: null, peers: clean.map(c => c.ticker) };
+    }
  
     const diffPct = ((targetPE - medianPE) / medianPE * 100);
     return {
@@ -302,12 +324,13 @@ async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
       avgPE:     parseFloat(avgPE.toFixed(1)),
       peerCount: clean.length,
       diff:      parseFloat(diffPct.toFixed(1)),
-      peers:     clean.map(c=>c.ticker)
+      peers:     clean.map(c => c.ticker)
     };
   } catch (_) {
     return null;
   }
 }
+ 
  
 // ── Rating ────────────────────────────────────────────────────────────────────
 function getRating(score) {
@@ -330,7 +353,7 @@ async function fetchStockData(ticker) {
   const curPx   = quote.status === 'fulfilled' ? quote.value?.c : null;
   const m       = metrics.status === 'fulfilled' ? metrics.value?.metric || {} : {};
   const targetPE = m.peBasicExclExtraTTM || m.peTTM || null;
-  const targetMC = (m.marketCapitalization||0)*1e6;
+  const targetMC = (m.marketCapitalization||0);
   const targetMargin = m.netProfitMarginAnnual || m.netProfitMarginTTM || 0;
  
   // Parallel: MA + insider + peer PE
