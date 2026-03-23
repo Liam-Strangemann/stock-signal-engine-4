@@ -360,6 +360,7 @@ async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
  
 // ── Rating ────────────────────────────────────────────────────────────────────
 function getRating(score) {
+  if (score === 6) return { label:'Strong buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
   if (score === 5) return { label:'Strong buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
   if (score === 4) return { label:'Buy',         color:'#15803d', bg:'#f0fdf4', border:'#bbf7d0' };
   if (score === 3) return { label:'Watch',       color:'#92400e', bg:'#fffbeb', border:'#fde68a' };
@@ -468,15 +469,30 @@ function evaluate(ticker, d) {
     }
   } catch(_) {}
  
-  const signals = [s1,s2,s3,s4,s5];
+  // Signal 6 -- Peer PE comparison (pass = cheaper than peers, fail = pricier)
+  let s6 = { status:'neutral', value:'No data' };
+  try {
+    const pp = d.peerPE;
+    if (pp && pp.medianPE && pp.diff !== null) {
+      if (pp.diff < -8)       s6 = { status:'pass', value:`${Math.abs(pp.diff).toFixed(0)}% < peer med ${pp.medianPE}x` };
+      else if (pp.diff > 8)   s6 = { status:'fail', value:`${Math.abs(pp.diff).toFixed(0)}% > peer med ${pp.medianPE}x` };
+      else                    s6 = { status:'neutral', value:`In line, med ${pp.medianPE}x` };
+    } else if (pp && pp.medianPE) {
+      s6 = { status:'neutral', value:`Peer med ${pp.medianPE}x` };
+    }
+  } catch(_) {}
+ 
+  const signals = [s1,s2,s3,s4,s5,s6];
   const score   = signals.filter(s=>s.status==='pass').length;
-  const passes  = signals.map((s,i)=>s.status==='pass'?['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside'][i]:null).filter(Boolean);
-  const fails   = signals.map((s,i)=>s.status==='fail'?['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside'][i]:null).filter(Boolean);
+  const SIG_NAMES = ['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside','PE vs peers'];
+  const passes  = signals.map((s,i)=>s.status==='pass'?SIG_NAMES[i]:null).filter(Boolean);
+  const fails   = signals.map((s,i)=>s.status==='fail'?SIG_NAMES[i]:null).filter(Boolean);
  
   let summary;
-  if (score>=4)      summary=`Strong value candidate — ${score}/5 signals pass. Strengths: ${passes.join(', ')}.`;
-  else if (score===3)summary=`Moderate signals (3/5). Passes: ${passes.join(', ')}.`;
-  else if (score>0)  summary=`Weak signals (${score}/5). Fails: ${fails.join(', ')}.`;
+  if (score>=5)      summary=`Strong value candidate -- ${score}/6 signals pass. Strengths: ${passes.join(', ')}.`;
+  else if (score===4)summary=`Good signals (4/6). Passes: ${passes.join(', ')}.`;
+  else if (score===3)summary=`Moderate signals (3/6). Passes: ${passes.join(', ')}.`;
+  else if (score>0)  summary=`Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
   else               summary=`No signals pass. Fails: ${fails.join(', ')}.`;
  
   return {
