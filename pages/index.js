@@ -1,3 +1,4 @@
+// v2.1 - peer PE panel always visible
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Head from 'next/head';
  
@@ -41,11 +42,18 @@ function SigBadge({ sig }) {
 }
  
 // ── Peer PE comparison panel shown below the signal badges ───────────────────
-function PeerPEPanel({ peerPE, stockTicker }) {
-  if (!peerPE) return null;
+function PeerPEPanel({ peerPE }) {
+  if (!peerPE || !peerPE.medianPE) {
+    return (
+      <div style={{ borderTop:'0.5px solid #1f1f26', paddingTop:8, marginTop:8 }}>
+        <div style={{ fontSize:9, color:'#555', fontFamily:'monospace', textTransform:'uppercase', letterSpacing:.5, marginBottom:4 }}>Peer PE comparison</div>
+        <div style={{ fontSize:11, color:'#444', fontFamily:'monospace' }}>
+          {peerPE === null ? 'No comparable peers found' : 'Fetching peer data…'}
+        </div>
+      </div>
+    );
+  }
   const { medianPE, avgPE, peerCount, diff, peers } = peerPE;
-  if (!medianPE) return null;
- 
   const hasDiff   = diff !== null && diff !== undefined;
   const cheaper   = hasDiff && diff < -8;
   const expensive = hasDiff && diff > 8;
