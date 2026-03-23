@@ -357,19 +357,6 @@ async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
   }
 }
  
-    const diffPct = ((targetPE - medianPE) / medianPE * 100);
-    return {
-      medianPE:  parseFloat(medianPE.toFixed(1)),
-      avgPE:     parseFloat(avgPE.toFixed(1)),
-      peerCount: clean.length,
-      diff:      parseFloat(diffPct.toFixed(1)),
-      peers:     clean.map(c => c.ticker)
-    };
-  } catch (_) {
-    return null;
-  }
-}
- 
  
 // ── Rating ────────────────────────────────────────────────────────────────────
 function getRating(score) {
