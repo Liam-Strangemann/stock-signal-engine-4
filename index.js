@@ -1,3 +1,4 @@
+// v2.1 - peer PE panel always visible
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Head from 'next/head';
  
@@ -40,61 +41,40 @@ function SigBadge({ sig }) {
   );
 }
  
-// ── Peer PE comparison panel shown below the signal badges ───────────────────
-function PeerPEPanel({ peerPE, stockTicker }) {
-  if (!peerPE) return null;
+//-- Peer PE comparison panel shown below the signal badges -------------------
+function PeerPEBadge({ peerPE }) {
+  if (!peerPE || !peerPE.medianPE) {
+    return (
+      <div style={{ background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:7, padding:'6px 7px' }}>
+        <div style={{ fontSize:9, color:'#888', marginBottom:3, lineHeight:1.3 }}>PE vs peers</div>
+        <div style={{ fontSize:10, fontWeight:500, fontFamily:'monospace', color:'#444', lineHeight:1.3 }}>
+          {peerPE === null ? 'No peers found' : 'Loading...'}
+        </div>
+      </div>
+    );
+  }
   const { medianPE, avgPE, peerCount, diff, peers } = peerPE;
-  if (!medianPE) return null;
- 
-  const hasDiff   = diff !== null && diff !== undefined;
-  const cheaper   = hasDiff && diff < -8;
-  const expensive = hasDiff && diff > 8;
-  const neutral   = !hasDiff || (diff >= -8 && diff <= 8);
- 
-  const diffColor  = cheaper ? '#27500A' : expensive ? '#A32D2D' : '#888';
-  const diffBg     = cheaper ? '#EAF3DE' : expensive ? '#FCEBEB' : '#18181c';
-  const diffBorder = cheaper ? '#C0DD97' : expensive ? '#F7C1C1' : '#2a2a30';
- 
-  const diffLabel  = hasDiff
-    ? (cheaper   ? `${Math.abs(diff).toFixed(1)}% cheaper than peers`
-       : expensive ? `${Math.abs(diff).toFixed(1)}% pricier than peers`
-       : `In line with peers (${diff > 0 ? '+' : ''}${diff.toFixed(1)}%)`)
-    : 'Peer data available';
- 
-  const peerStr = peers && peers.length > 0
-    ? peers.slice(0, 6).join(', ') + (peers.length > 6 ? ` +${peers.length - 6}` : '')
-    : '';
- 
+  const cheaper   = diff !== null && diff < -8;
+  const expensive = diff !== null && diff > 8;
+  const bg        = cheaper ? '#EAF3DE' : expensive ? '#FCEBEB' : '#18181c';
+  const color     = cheaper ? '#27500A' : expensive ? '#A32D2D' : '#888';
+  const bd        = cheaper ? '#C0DD97' : expensive ? '#F7C1C1' : '#2a2a30';
+  const label     = diff === null ? `Med ${medianPE}x (${peerCount}co)`
+                  : cheaper   ? `${Math.abs(diff).toFixed(0)}% < peers`
+                  : expensive ? `${Math.abs(diff).toFixed(0)}% > peers`
+                  : `~inline (${diff > 0 ? '+' : ''}${diff.toFixed(0)}%)`;
+  const sub       = `Med ${medianPE}x  - Avg ${avgPE}x`;
   return (
-    <div style={{ borderTop:'0.5px solid #1f1f26', paddingTop:8, marginTop:8 }}>
-      <div style={{ fontSize:9, color:'#666', fontFamily:'monospace', marginBottom:6, textTransform:'uppercase', letterSpacing:.5 }}>
-        Peer PE comparison · {peerCount} comparable co{peerCount !== 1 ? 's' : ''}
+    <div style={{ background:bg, border:`0.5px solid ${bd}`, borderRadius:7, padding:'6px 7px' }}>
+      <div style={{ fontSize:9, color:'#888', marginBottom:3, lineHeight:1.3 }}>PE vs peers ({peerCount})</div>
+      <div style={{ fontSize:10, fontWeight:500, fontFamily:'monospace', color, lineHeight:1.3, wordBreak:'break-word' }}>
+        {label}
       </div>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:5 }}>
-        {/* Median peer PE */}
-        <div style={{ background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:7, padding:'6px 8px' }}>
-          <div style={{ fontSize:9, color:'#666', marginBottom:3 }}>Peer median PE</div>
-          <div style={{ fontSize:13, fontWeight:500, fontFamily:'monospace', color:'#a1a0aa' }}>{medianPE}x</div>
-        </div>
-        {/* Peer avg PE */}
-        <div style={{ background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:7, padding:'6px 8px' }}>
-          <div style={{ fontSize:9, color:'#666', marginBottom:3 }}>Peer avg PE</div>
-          <div style={{ fontSize:13, fontWeight:500, fontFamily:'monospace', color:'#a1a0aa' }}>{avgPE}x</div>
-        </div>
-        {/* Relative valuation */}
-        <div style={{ background:diffBg, border:`0.5px solid ${diffBorder}`, borderRadius:7, padding:'6px 8px' }}>
-          <div style={{ fontSize:9, color:'#666', marginBottom:3 }}>vs peers</div>
-          <div style={{ fontSize:10, fontWeight:500, fontFamily:'monospace', color:diffColor, lineHeight:1.3 }}>{diffLabel}</div>
-        </div>
-      </div>
-      {peerStr && (
-        <div style={{ fontSize:9, color:'#444', fontFamily:'monospace', marginTop:5, lineHeight:1.5 }}>
-          Peers: {peerStr}
-        </div>
-      )}
+      <div style={{ fontSize:9, color:'#555', fontFamily:'monospace', marginTop:2 }}>{sub}</div>
     </div>
   );
 }
+ 
  
 function StockCard({ stock, rank }) {
   const sc       = Math.min(stock.score || 0, 5);
@@ -155,23 +135,21 @@ function StockCard({ stock, rank }) {
         </div>
       </div>
  
-      {/* Signal badges */}
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:4, marginBottom:8 }}>
+      {/* Signal badges — 5 signals + peer PE badge as 6th */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:4, marginBottom:8 }}>
         {SIG_LABELS.map((label, i) => {
           const sig = (stock.signals || [])[i] || {};
           return <SigBadge key={i} sig={{ ...sig, label }}/>;
         })}
+        <PeerPEBadge peerPE={stock.peerPE} />
       </div>
- 
-      {/* Peer PE panel */}
-      <PeerPEPanel peerPE={stock.peerPE} stockTicker={stock.ticker} />
  
       {/* Summary */}
       {stock.summary && (
         <div style={{ fontSize:12, color:'#a1a0aa', borderTop:'0.5px solid #1f1f26', paddingTop:8, marginTop:8, lineHeight:1.55 }}>
           {stock.summary}
           <div style={{ fontSize:10, color:'#555', fontFamily:'monospace', marginTop:4 }}>
-            Finnhub · {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : new Date().toLocaleTimeString()}
+            Finnhub  - {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : new Date().toLocaleTimeString()}
           </div>
         </div>
       )}
@@ -198,7 +176,7 @@ export default function Home() {
  
   const scan = useCallback(async (tickers) => {
     setScanning(true);
-    setStatus(`Fetching data for ${tickers.length} stocks…`);
+    setStatus(`Fetching data for ${tickers.length} stocks...`);
     setProgress(10);
     try {
       const res = await fetch('/api/analyse', {
@@ -290,13 +268,13 @@ export default function Home() {
               </div>
               <div>
                 <h1 style={{ fontSize:20, fontWeight:500, letterSpacing:-.3, margin:0 }}>Stock Signal Engine</h1>
-                <p style={{ fontSize:11, color:'#5a5966', fontFamily:'monospace', marginTop:2 }}>5-factor scanner + peer PE comparison · Finnhub live data · auto-refresh 5 min</p>
+                <p style={{ fontSize:11, color:'#5a5966', fontFamily:'monospace', marginTop:2 }}>5-factor scanner + peer PE comparison  - Finnhub live data  - auto-refresh 5 min</p>
               </div>
             </div>
             <div style={{ textAlign:'right', fontSize:11, color:'#5a5966', fontFamily:'monospace', lineHeight:1.8 }}>
               <div>
                 <span style={{ display:'inline-block', width:7, height:7, borderRadius:'50%', background: scanning ? '#fbbf24' : results.length ? '#4ade80' : '#5a5966', marginRight:5, verticalAlign:'middle', animation: scanning ? 'pulse 1s infinite' : 'none' }}/>
-                {scanning ? 'Scanning…' : results.length ? 'Live' : 'Ready'}
+                {scanning ? 'Scanning...' : results.length ? 'Live' : 'Ready'}
               </div>
               {updatedAt && <div>Updated {updatedAt}</div>}
               <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
@@ -329,11 +307,11 @@ export default function Home() {
           <div style={{ background:'#111114', border:'0.5px solid #1f1f26', borderRadius:12, padding:'1.125rem 1.25rem', marginBottom:'1.125rem' }}>
             <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', marginBottom:10 }}>
               <input type="text" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&runScan()}
-                placeholder="Enter tickers: AAPL, MSFT, NVDA, TSM …"
+                placeholder="Enter tickers: AAPL, MSFT, NVDA, TSM ..."
                 style={{ flex:1, minWidth:180, background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:8, padding:'8px 12px', fontSize:13, fontFamily:'monospace', color:'#f0eff4', outline:'none' }}/>
               <button onClick={runScan} disabled={scanning}
                 style={{ padding:'8px 16px', borderRadius:8, fontSize:13, fontWeight:500, cursor:scanning?'not-allowed':'pointer', opacity:scanning?.38:1, background:'#7c6af7', border:'none', color:'#fff', whiteSpace:'nowrap' }}>
-                {scanning ? 'Scanning…' : '▶ Scan'}
+                {scanning ? 'Scanning...' : '▶ Scan'}
               </button>
               {results.length > 0 && (
                 <button onClick={doRefresh} disabled={scanning}
