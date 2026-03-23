@@ -42,67 +42,39 @@ function SigBadge({ sig }) {
 }
  
 // ── Peer PE comparison panel shown below the signal badges ───────────────────
-function PeerPEPanel({ peerPE }) {
+function PeerPEBadge({ peerPE }) {
   if (!peerPE || !peerPE.medianPE) {
     return (
-      <div style={{ borderTop:'0.5px solid #1f1f26', paddingTop:8, marginTop:8 }}>
-        <div style={{ fontSize:9, color:'#555', fontFamily:'monospace', textTransform:'uppercase', letterSpacing:.5, marginBottom:4 }}>Peer PE comparison</div>
-        <div style={{ fontSize:11, color:'#444', fontFamily:'monospace' }}>
-          {peerPE === null ? 'No comparable peers found' : 'Fetching peer data…'}
+      <div style={{ background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:7, padding:'6px 7px' }}>
+        <div style={{ fontSize:9, color:'#888', marginBottom:3, lineHeight:1.3 }}>PE vs peers</div>
+        <div style={{ fontSize:10, fontWeight:500, fontFamily:'monospace', color:'#444', lineHeight:1.3 }}>
+          {peerPE === null ? 'No peers found' : 'Loading…'}
         </div>
       </div>
     );
   }
   const { medianPE, avgPE, peerCount, diff, peers } = peerPE;
-  const hasDiff   = diff !== null && diff !== undefined;
-  const cheaper   = hasDiff && diff < -8;
-  const expensive = hasDiff && diff > 8;
-  const neutral   = !hasDiff || (diff >= -8 && diff <= 8);
- 
-  const diffColor  = cheaper ? '#27500A' : expensive ? '#A32D2D' : '#888';
-  const diffBg     = cheaper ? '#EAF3DE' : expensive ? '#FCEBEB' : '#18181c';
-  const diffBorder = cheaper ? '#C0DD97' : expensive ? '#F7C1C1' : '#2a2a30';
- 
-  const diffLabel  = hasDiff
-    ? (cheaper   ? `${Math.abs(diff).toFixed(1)}% cheaper than peers`
-       : expensive ? `${Math.abs(diff).toFixed(1)}% pricier than peers`
-       : `In line with peers (${diff > 0 ? '+' : ''}${diff.toFixed(1)}%)`)
-    : 'Peer data available';
- 
-  const peerStr = peers && peers.length > 0
-    ? peers.slice(0, 6).join(', ') + (peers.length > 6 ? ` +${peers.length - 6}` : '')
-    : '';
- 
+  const cheaper   = diff !== null && diff < -8;
+  const expensive = diff !== null && diff > 8;
+  const bg        = cheaper ? '#EAF3DE' : expensive ? '#FCEBEB' : '#18181c';
+  const color     = cheaper ? '#27500A' : expensive ? '#A32D2D' : '#888';
+  const bd        = cheaper ? '#C0DD97' : expensive ? '#F7C1C1' : '#2a2a30';
+  const label     = diff === null ? `Med ${medianPE}x (${peerCount}co)`
+                  : cheaper   ? `${Math.abs(diff).toFixed(0)}% < peers`
+                  : expensive ? `${Math.abs(diff).toFixed(0)}% > peers`
+                  : `~inline (${diff > 0 ? '+' : ''}${diff.toFixed(0)}%)`;
+  const sub       = `Med ${medianPE}x · Avg ${avgPE}x`;
   return (
-    <div style={{ borderTop:'0.5px solid #1f1f26', paddingTop:8, marginTop:8 }}>
-      <div style={{ fontSize:9, color:'#666', fontFamily:'monospace', marginBottom:6, textTransform:'uppercase', letterSpacing:.5 }}>
-        Peer PE comparison · {peerCount} comparable co{peerCount !== 1 ? 's' : ''}
+    <div style={{ background:bg, border:`0.5px solid ${bd}`, borderRadius:7, padding:'6px 7px' }}>
+      <div style={{ fontSize:9, color:'#888', marginBottom:3, lineHeight:1.3 }}>PE vs peers ({peerCount})</div>
+      <div style={{ fontSize:10, fontWeight:500, fontFamily:'monospace', color, lineHeight:1.3, wordBreak:'break-word' }}>
+        {label}
       </div>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:5 }}>
-        {/* Median peer PE */}
-        <div style={{ background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:7, padding:'6px 8px' }}>
-          <div style={{ fontSize:9, color:'#666', marginBottom:3 }}>Peer median PE</div>
-          <div style={{ fontSize:13, fontWeight:500, fontFamily:'monospace', color:'#a1a0aa' }}>{medianPE}x</div>
-        </div>
-        {/* Peer avg PE */}
-        <div style={{ background:'#18181c', border:'0.5px solid #2a2a30', borderRadius:7, padding:'6px 8px' }}>
-          <div style={{ fontSize:9, color:'#666', marginBottom:3 }}>Peer avg PE</div>
-          <div style={{ fontSize:13, fontWeight:500, fontFamily:'monospace', color:'#a1a0aa' }}>{avgPE}x</div>
-        </div>
-        {/* Relative valuation */}
-        <div style={{ background:diffBg, border:`0.5px solid ${diffBorder}`, borderRadius:7, padding:'6px 8px' }}>
-          <div style={{ fontSize:9, color:'#666', marginBottom:3 }}>vs peers</div>
-          <div style={{ fontSize:10, fontWeight:500, fontFamily:'monospace', color:diffColor, lineHeight:1.3 }}>{diffLabel}</div>
-        </div>
-      </div>
-      {peerStr && (
-        <div style={{ fontSize:9, color:'#444', fontFamily:'monospace', marginTop:5, lineHeight:1.5 }}>
-          Peers: {peerStr}
-        </div>
-      )}
+      <div style={{ fontSize:9, color:'#555', fontFamily:'monospace', marginTop:2 }}>{sub}</div>
     </div>
   );
 }
+ 
  
 function StockCard({ stock, rank }) {
   const sc       = Math.min(stock.score || 0, 5);
@@ -163,16 +135,14 @@ function StockCard({ stock, rank }) {
         </div>
       </div>
  
-      {/* Signal badges */}
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:4, marginBottom:8 }}>
+      {/* Signal badges — 5 signals + peer PE badge as 6th */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:4, marginBottom:8 }}>
         {SIG_LABELS.map((label, i) => {
           const sig = (stock.signals || [])[i] || {};
           return <SigBadge key={i} sig={{ ...sig, label }}/>;
         })}
+        <PeerPEBadge peerPE={stock.peerPE} />
       </div>
- 
-      {/* Peer PE panel */}
-      <PeerPEPanel peerPE={stock.peerPE} stockTicker={stock.ticker} />
  
       {/* Summary */}
       {stock.summary && (
