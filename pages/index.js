@@ -126,10 +126,9 @@ function FeatureCard({ stock, rank, medal }) {
           <div style={{ fontSize: 12, color: C.txLight, fontFamily: SANS }}>{stock.company || ''}</div>
         </div>
         <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 28, fontWeight: 700, fontFamily: FONTS,
+          <div style={{ fontSize: 22, fontWeight: 700, fontFamily: SANS, letterSpacing: '0.02em',
             color: sc >= 5 ? C.gold : sc >= 4 ? '#A8C080' : sc >= 3 ? '#C8A870' : C.txLight }}>
-            {sc}
-            <span style={{ fontSize: 13, color: C.txLight, fontWeight: 400 }}>/6</span>
+            {sc + '/6'}
           </div>
           <ScoreDots score={sc} max={6}/>
         </div>
@@ -218,10 +217,10 @@ function ResultCard({ stock, rank }) {
             )}
           </div>
         </div>
-        <div style={{ textAlign: 'right', flexShrink: 0 }}>
-          <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS,
+        <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: SANS, letterSpacing: '0.02em',
             color: sc >= 5 ? C.gold : sc >= 4 ? C.green : sc >= 3 ? '#B8903A' : C.txLight }}>
-            {sc}<span style={{ fontSize: 12, color: C.txLight, fontWeight: 400 }}>/6</span>
+            {sc + '/6'}
           </div>
           <ScoreDots score={sc} max={6}/>
         </div>
@@ -406,7 +405,7 @@ export default function Home() {
                   SIGNAL ENGINE
                 </div>
                 <div style={{ fontSize: 9, color: C.gold, fontFamily: SANS, letterSpacing: '0.18em', textTransform: 'uppercase', marginTop: 1 }}>
-                  Equity Value Intelligence
+                  Equity Undervalue Scanner
                 </div>
               </div>
             </div>
@@ -425,7 +424,7 @@ export default function Home() {
           {/* -- Top 3 Picks -- */}
           <div style={{ marginBottom: 40 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 20 }}>
-              <h2 style={{ fontSize: 32, fontFamily: FONTS, fontWeight: 300, color: C.tx, letterSpacing: '0.02em' }}>
+              <h2 style={{ fontSize: 42, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em' }}>
                 Top Picks Today
               </h2>
               <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
@@ -469,28 +468,13 @@ export default function Home() {
  
           {/* -- Divider -- */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 32 }}>
-            <h2 style={{ fontSize: 32, fontFamily: FONTS, fontWeight: 300, color: C.tx, letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
+            <h2 style={{ fontSize: 42, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
               Custom Scan
             </h2>
             <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
           </div>
  
-          {/* -- Stats -- */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 24 }}>
-            {[
-              { label: 'Scanned',      val: stats.total,    hi: false },
-              { label: 'Strong (5-6)', val: stats.strong,   hi: true  },
-              { label: 'Moderate (3-4)',val: stats.moderate, hi: false },
-              { label: 'Avg Score',    val: stats.avg,      hi: false },
-            ].map(function(s) {
-              return (
-                <div key={s.label} style={{ background: C.cardBg, border: '0.5px solid ' + C.borderDk, borderTop: '2px solid ' + (s.hi ? C.gold : C.border), padding: '14px 16px' }}>
-                  <div style={{ fontSize: 9, color: C.txLight, fontFamily: SANS, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>{s.label}</div>
-                  <div style={{ fontSize: 28, fontFamily: FONTS, fontWeight: 600, color: s.hi ? C.gold : C.tx }}>{s.val}</div>
-                </div>
-              );
-            })}
-          </div>
+ 
  
           {/* -- Search & Presets -- */}
           <div style={{ background: C.cardBg, border: '0.5px solid ' + C.borderDk, padding: '20px 20px', marginBottom: 20 }}>
