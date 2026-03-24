@@ -18,24 +18,22 @@ var US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,O
  
 var EXCHANGE_MAP = {
   AAPL:'NASDAQ',MSFT:'NASDAQ',GOOGL:'NASDAQ',AMZN:'NASDAQ',META:'NASDAQ',
-  NVDA:'NASDAQ',TSLA:'NASDAQ',AVGO:'NASDAQ',COST:'NASDAQ',INTC:'NASDAQ',
-  AMD:'NASDAQ',AMGN:'NASDAQ',QCOM:'NASDAQ',SBUX:'NASDAQ',PEP:'NASDAQ',
-  TXN:'NASDAQ',HON:'NASDAQ',ASML:'NASDAQ',AZN:'NASDAQ',
-  'BRK.B':'NYSE',JPM:'NYSE',JNJ:'NYSE',V:'NYSE',PG:'NYSE',
-  UNH:'NYSE',HD:'NYSE',MA:'NYSE',XOM:'NYSE',CVX:'NYSE',
-  ABBV:'NYSE',MRK:'NYSE',KO:'NYSE',TMO:'NYSE',MCD:'NYSE',
-  ACN:'NYSE',LIN:'NYSE',DHR:'NYSE',NEE:'NYSE',PM:'NYSE',
-  UNP:'NYSE',IBM:'NYSE',GS:'NYSE',CAT:'NYSE',BA:'NYSE',
-  MMM:'NYSE',GE:'NYSE',F:'NYSE',GM:'NYSE',WMT:'NYSE',
-  TGT:'NYSE',LOW:'NYSE',NKE:'NYSE',NVO:'NYSE',SAP:'NYSE',
-  TM:'NYSE',HSBC:'NYSE',SHEL:'NYSE',BHP:'NYSE',RIO:'NYSE',
-  TSM:'NYSE',LLY:'NYSE',ORCL:'NYSE',AMAT:'NASDAQ',MU:'NASDAQ',
-  ADBE:'NASDAQ',BAC:'NYSE',WFC:'NYSE',MS:'NYSE',BLK:'NYSE',
-  C:'NYSE',AXP:'NYSE',SCHW:'NYSE',USB:'NYSE',PNC:'NYSE',
-  TFC:'NYSE',PFE:'NYSE',ABT:'NYSE',CVS:'NYSE',MDT:'NYSE',
-  ISRG:'NASDAQ',COP:'NYSE',EOG:'NYSE',SLB:'NYSE',MPC:'NYSE',
-  PSX:'NYSE',VLO:'NYSE',OXY:'NYSE',DVN:'NYSE',HAL:'NYSE',
-  BKR:'NYSE',T:'NYSE',VZ:'NYSE',MO:'NYSE',WBA:'NASDAQ',
+  NVDA:'NASDAQ',AVGO:'NASDAQ',COST:'NASDAQ',INTC:'NASDAQ',AMD:'NASDAQ',
+  AMGN:'NASDAQ',QCOM:'NASDAQ',SBUX:'NASDAQ',PEP:'NASDAQ',TXN:'NASDAQ',
+  HON:'NASDAQ',ASML:'NASDAQ',AZN:'NASDAQ',CSCO:'NASDAQ',INTU:'NASDAQ',
+  'BRK.B':'NYSE',JPM:'NYSE',JNJ:'NYSE',V:'NYSE',PG:'NYSE',UNH:'NYSE',
+  HD:'NYSE',MA:'NYSE',XOM:'NYSE',CVX:'NYSE',ABBV:'NYSE',MRK:'NYSE',
+  KO:'NYSE',TMO:'NYSE',MCD:'NYSE',ACN:'NYSE',LIN:'NYSE',DHR:'NYSE',
+  NEE:'NYSE',PM:'NYSE',UNP:'NYSE',IBM:'NYSE',GS:'NYSE',CAT:'NYSE',
+  BA:'NYSE',MMM:'NYSE',GE:'NYSE',F:'NYSE',GM:'NYSE',WMT:'NYSE',
+  TGT:'NYSE',LOW:'NYSE',NKE:'NYSE',NVO:'NYSE',SAP:'NYSE',TM:'NYSE',
+  HSBC:'NYSE',SHEL:'NYSE',BHP:'NYSE',RIO:'NYSE',TSM:'NYSE',LLY:'NYSE',
+  ORCL:'NYSE',AMAT:'NASDAQ',MU:'NASDAQ',ADBE:'NASDAQ',BAC:'NYSE',
+  WFC:'NYSE',MS:'NYSE',BLK:'NYSE',C:'NYSE',AXP:'NYSE',SCHW:'NYSE',
+  USB:'NYSE',PNC:'NYSE',TFC:'NYSE',PFE:'NYSE',ABT:'NYSE',CVS:'NYSE',
+  MDT:'NYSE',ISRG:'NASDAQ',COP:'NYSE',EOG:'NYSE',SLB:'NYSE',MPC:'NYSE',
+  PSX:'NYSE',VLO:'NYSE',OXY:'NYSE',DVN:'NYSE',HAL:'NYSE',BKR:'NYSE',
+  T:'NYSE',VZ:'NYSE',MO:'NYSE',WBA:'NASDAQ',TMUS:'NASDAQ',
 };
  
 function getExchange(stock) {
@@ -45,27 +43,13 @@ function getExchange(stock) {
 }
  
 var C = {
-  pageBg:   '#F1EFE8',
-  cardBg:   '#E8E5DC',
-  darkBg:   '#5F5E56',
-  deepBg:   '#3A3832',
-  accent:   '#8B7D6B',
-  accentDk: '#6B5D4F',
-  gold:     '#B8A070',
-  border:   'rgba(95,94,86,0.2)',
-  borderDk: 'rgba(95,94,86,0.4)',
-  tx:       '#2C2C2A',
-  txMid:    '#5F5E56',
-  txLight:  '#9A9890',
-  amber:    '#B8903A',
-  amberBg:  '#F5EDD0',
-  amberBd:  '#D4B870',
-  green:    '#4A6741',
-  greenBg:  '#DDE8D8',
-  greenBd:  '#A8C0A0',
-  red:      '#7A3A30',
-  redBg:    '#F0DDD9',
-  redBd:    '#C8A09A',
+  pageBg:   '#F1EFE8', cardBg:   '#E8E5DC', darkBg:   '#5F5E56',
+  deepBg:   '#3A3832', accent:   '#8B7D6B', accentDk: '#6B5D4F',
+  gold:     '#B8A070', border:   'rgba(95,94,86,0.2)', borderDk: 'rgba(95,94,86,0.4)',
+  tx:       '#2C2C2A', txMid:    '#5F5E56', txLight:  '#9A9890',
+  amber:    '#B8903A', amberBg:  '#F5EDD0', amberBd:  '#D4B870',
+  green:    '#4A6741', greenBg:  '#DDE8D8', greenBd:  '#A8C0A0',
+  red:      '#7A3A30', redBg:    '#F0DDD9', redBd:    '#C8A09A',
 };
  
 var FONTS = "'Cormorant Garamond', 'Georgia', serif";
@@ -107,18 +91,13 @@ function SigPill({ sig }) {
     <div style={{ background: bg, border: '0.5px solid ' + bd, borderRadius: 6, padding: '5px 7px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
         <div style={{ width: 5, height: 5, borderRadius: '50%', background: dot, flexShrink: 0 }}/>
-        <div style={{ fontSize: 8, color: C.txLight, fontFamily: SANS, textTransform: 'uppercase', letterSpacing: '0.04em', lineHeight: 1.2 }}>
-          {sig.label}
-        </div>
+        <div style={{ fontSize: 8, color: C.txLight, fontFamily: SANS, textTransform: 'uppercase', letterSpacing: '0.04em', lineHeight: 1.2 }}>{sig.label}</div>
       </div>
-      <div style={{ fontSize: 10, fontWeight: 500, color: color, fontFamily: MONO, lineHeight: 1.3, wordBreak: 'break-word' }}>
-        {sig.value || '--'}
-      </div>
+      <div style={{ fontSize: 10, fontWeight: 500, color: color, fontFamily: MONO, lineHeight: 1.3, wordBreak: 'break-word' }}>{sig.value || '--'}</div>
     </div>
   );
 }
  
-// Score with equal-width DM Mono digits
 function ScoreDisplay({ score, size }) {
   var sc = Math.min(score || 0, 6);
   var c  = sc >= 5 ? C.gold : sc >= 4 ? '#A8C080' : sc >= 3 ? '#C8A870' : C.txLight;
@@ -129,7 +108,9 @@ function ScoreDisplay({ score, size }) {
   );
 }
  
-// ── Large feature card for Top 3 ─────────────────────────────────────────────
+// ── Feature card — flex column so all three cards match height ────────────────
+// The summary box has flex:1 which pushes it to fill whatever space remains,
+// ensuring the bottom edge of every card aligns regardless of summary length.
 function FeatureCard({ stock, rank }) {
   if (!stock) return null;
   var sc       = Math.min(stock.score || 0, 6);
@@ -140,39 +121,38 @@ function FeatureCard({ stock, rank }) {
  
   return (
     <div style={{
-      background: C.deepBg, border: '1px solid ' + C.accent,
-      borderTop: '3px solid ' + C.gold, borderRadius: 2,
-      padding: '24px 22px', position: 'relative', flex: 1, minWidth: 0,
+      background:     C.deepBg,
+      border:         '1px solid ' + C.accent,
+      borderTop:      '3px solid ' + C.gold,
+      borderRadius:   2,
+      padding:        '24px 22px',
+      flex:           1,
+      minWidth:       0,
+      // Flex column so summary stretches to fill remaining height
+      display:        'flex',
+      flexDirection:  'column',
     }}>
-      {/* Top row: rank label (left) | timestamp + score + dots (right, stacked) */}
+      {/* Top row */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
-        {/* Left: rank + ticker + exchange + company */}
         <div>
           <div style={{ fontSize: 10, color: C.gold, fontFamily: SANS, letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>
             {'Rank ' + medals[rank - 1]}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ fontSize: 26, fontWeight: 700, fontFamily: FONTS, color: '#F1EFE8', letterSpacing: '0.02em' }}>
-              {stock.ticker}
-            </span>
-            <span style={{ fontSize: 9, fontFamily: SANS, padding: '2px 6px', borderRadius: 2, letterSpacing: '0.08em', background: 'rgba(184,160,112,0.15)', color: C.gold, border: '0.5px solid ' + C.gold }}>
-              {exchange}
-            </span>
+            <span style={{ fontSize: 26, fontWeight: 700, fontFamily: FONTS, color: '#F1EFE8', letterSpacing: '0.02em' }}>{stock.ticker}</span>
+            <span style={{ fontSize: 9, fontFamily: SANS, padding: '2px 6px', borderRadius: 2, letterSpacing: '0.08em', background: 'rgba(184,160,112,0.15)', color: C.gold, border: '0.5px solid ' + C.gold }}>{exchange}</span>
           </div>
           <div style={{ fontSize: 12, color: C.txLight, fontFamily: SANS }}>{stock.company || ''}</div>
         </div>
- 
-        {/* Right: timestamp directly above score, then dots — all right-aligned */}
+        {/* Timestamp sits directly above score — same right-aligned column */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <div style={{ fontSize: 9, color: 'rgba(154,152,144,0.55)', fontFamily: MONO, letterSpacing: '0.04em' }}>
-            {timeStr}
-          </div>
+          <div style={{ fontSize: 9, color: 'rgba(154,152,144,0.55)', fontFamily: MONO, letterSpacing: '0.04em' }}>{timeStr}</div>
           <ScoreDisplay score={sc} size={24}/>
           <ScoreDots score={sc} max={6}/>
         </div>
       </div>
  
-      {/* Price row */}
+      {/* Price */}
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 18, fontFamily: SANS, fontWeight: 500, color: '#F1EFE8' }}>
           {stock.price || '--'}
@@ -189,17 +169,23 @@ function FeatureCard({ stock, rank }) {
         })}
       </div>
  
-      {/* Summary */}
-      <div style={{ padding: '10px 12px', background: 'rgba(241,239,232,0.04)', borderRadius: 2, border: '0.5px solid rgba(184,160,112,0.2)' }}>
-        <span style={{ fontSize: 11, color: C.txLight, fontFamily: SANS, lineHeight: 1.55 }}>
-          {stock.summary || ''}
-        </span>
+      {/* Summary — flex:1 makes it fill remaining height, aligning card bottoms */}
+      <div style={{
+        flex:       1,
+        padding:    '10px 12px',
+        background: 'rgba(241,239,232,0.04)',
+        borderRadius: 2,
+        border:     '0.5px solid rgba(184,160,112,0.2)',
+        display:    'flex',
+        alignItems: 'flex-start',
+      }}>
+        <span style={{ fontSize: 11, color: C.txLight, fontFamily: SANS, lineHeight: 1.55 }}>{stock.summary || ''}</span>
       </div>
     </div>
   );
 }
  
-// ── Compact result card for custom scan ───────────────────────────────────────
+// ── Result card for custom scan ───────────────────────────────────────────────
 function ResultCard({ stock, rank }) {
   var sc       = Math.min(stock.score || 0, 6);
   var rating   = getRating(sc);
@@ -218,9 +204,7 @@ function ResultCard({ stock, rank }) {
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ width: 26, height: 26, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600, fontFamily: MONO, flexShrink: 0, background: rnkBg.bg, color: rnkBg.color }}>
-            {rank}
-          </div>
+          <div style={{ width: 26, height: 26, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600, fontFamily: MONO, flexShrink: 0, background: rnkBg.bg, color: rnkBg.color }}>{rank}</div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONTS, letterSpacing: '0.02em', color: C.tx }}>{stock.ticker}</span>
@@ -237,11 +221,8 @@ function ResultCard({ stock, rank }) {
             )}
           </div>
         </div>
-        {/* Score column: timestamp above score, then dots */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-          <div style={{ fontSize: 9, color: C.txLight, fontFamily: MONO }}>
-            {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
-          </div>
+          <div style={{ fontSize: 9, color: C.txLight, fontFamily: MONO }}>{stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}</div>
           <ScoreDisplay score={sc} size={20}/>
           <ScoreDots score={sc} max={6}/>
         </div>
@@ -257,34 +238,29 @@ function ResultCard({ stock, rank }) {
       {stock.summary && (
         <div style={{ fontSize: 11, color: C.txMid, borderTop: '0.5px solid ' + C.border, paddingTop: 8, lineHeight: 1.55, fontFamily: SANS }}>
           {stock.summary}
-          <span style={{ marginLeft: 8, fontSize: 9, color: C.txLight, fontFamily: MONO }}>
-            {'Finnhub · ' + (stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : '')}
-          </span>
+          <span style={{ marginLeft: 8, fontSize: 9, color: C.txLight, fontFamily: MONO }}>{'Finnhub · ' + (stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : '')}</span>
         </div>
       )}
       {stock.error && (
-        <div style={{ fontSize: 11, color: C.red, borderTop: '0.5px solid ' + C.border, paddingTop: 8, fontFamily: SANS }}>
-          {'Error: ' + stock.error}
-        </div>
+        <div style={{ fontSize: 11, color: C.red, borderTop: '0.5px solid ' + C.border, paddingTop: 8, fontFamily: SANS }}>{'Error: ' + stock.error}</div>
       )}
     </div>
   );
 }
  
 export default function Home() {
-  var inputState      = useState('');
-  var input           = inputState[0]; var setInput = inputState[1];
-  var resultsState    = useState([]); var results = resultsState[0]; var setResults = resultsState[1];
-  var scanningState   = useState(false); var scanning = scanningState[0]; var setScanning = scanningState[1];
-  var statusState     = useState(''); var status = statusState[0]; var setStatus = statusState[1];
-  var progressState   = useState(0); var progress = progressState[0]; var setProgress = progressState[1];
-  var filterState     = useState('all'); var filter = filterState[0]; var setFilter = filterState[1];
-  var updatedState    = useState(''); var updatedAt = updatedState[0]; var setUpdatedAt = updatedState[1];
-  var presetState     = useState(''); var activePreset = presetState[0]; var setActivePreset = presetState[1];
-  var top3State       = useState(null); var top3 = top3State[0]; var setTop3 = top3State[1];
-  var top3LoadState   = useState(false); var top3Loading = top3LoadState[0]; var setTop3Loading = top3LoadState[1];
-  var timerRef        = useRef(null);
-  var tickersRef      = useRef([]);
+  var [input, setInput]               = useState('');
+  var [results, setResults]           = useState([]);
+  var [scanning, setScanning]         = useState(false);
+  var [status, setStatus]             = useState('');
+  var [progress, setProgress]         = useState(0);
+  var [filter, setFilter]             = useState('all');
+  var [updatedAt, setUpdatedAt]       = useState('');
+  var [activePreset, setActivePreset] = useState('');
+  var [top3, setTop3]                 = useState(null);
+  var [top3Loading, setTop3Loading]   = useState(false);
+  var timerRef   = useRef(null);
+  var tickersRef = useRef([]);
  
   var scan = useCallback(function(tickers) {
     setScanning(true);
@@ -299,10 +275,7 @@ export default function Home() {
       return res.json();
     }).then(function(data) {
       var arr = Object.values(data.results).filter(Boolean).sort(function(a, b) { return (b.score || 0) - (a.score || 0); });
-      setResults(arr);
-      setUpdatedAt(new Date().toLocaleTimeString());
-      setStatus('');
-      setProgress(100);
+      setResults(arr); setUpdatedAt(new Date().toLocaleTimeString()); setStatus(''); setProgress(100);
     }).catch(function(e) {
       setStatus('Error: ' + e.message);
     }).finally(function() {
@@ -322,7 +295,6 @@ export default function Home() {
   }
  
   function doRefresh() { if (tickersRef.current.length) scan(tickersRef.current); }
- 
   useEffect(function() { return function() { clearInterval(timerRef.current); }; }, []);
  
   useEffect(function() {
@@ -357,8 +329,8 @@ export default function Home() {
     a.download = 'signals_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
   }
  
-  var top3Stocks   = top3 && top3.top3        ? top3.top3        : [];
-  var scannedTotal = top3 && top3.totalScanned ? top3.totalScanned : 0;
+  var top3Stocks   = top3?.top3        || [];
+  var scannedTotal = top3?.totalScanned || 0;
  
   return (
     <>
@@ -435,11 +407,12 @@ export default function Home() {
               </div>
             )}
  
+            {/* Cards row — align-items:stretch ensures equal height */}
             {!top3Loading && top3Stocks.length > 0 && (
-              <div style={{ display: 'flex', gap: 16 }}>
+              <div style={{ display: 'flex', gap: 16, alignItems: 'stretch' }}>
                 {top3Stocks.map(function(stock, i) {
                   return (
-                    <div key={stock.ticker} className="card-anim" style={{ flex: 1, minWidth: 0 }}>
+                    <div key={stock.ticker} className="card-anim" style={{ flex: 1, minWidth: 0, display: 'flex' }}>
                       <FeatureCard stock={stock} rank={i+1}/>
                     </div>
                   );
@@ -449,7 +422,7 @@ export default function Home() {
  
             {!top3Loading && top3Stocks.length === 0 && (
               <div style={{ padding: '32px', background: C.cardBg, border: '0.5px solid ' + C.border, borderRadius: 2, textAlign: 'center', color: C.txLight, fontFamily: SANS, fontSize: 13 }}>
-                Scanning ~300 securities — first load takes 30–60 seconds. Subsequent loads are instant from cache.
+                Scanning ~280 qualified securities — first load takes 30–60 seconds. Subsequent loads are instant from cache.
               </div>
             )}
           </div>
@@ -460,7 +433,7 @@ export default function Home() {
             <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
           </div>
  
-          <div style={{ background: C.cardBg, border: '0.5px solid ' + C.borderDk, padding: '20px 20px', marginBottom: 20 }}>
+          <div style={{ background: C.cardBg, border: '0.5px solid ' + C.borderDk, padding: '20px', marginBottom: 20 }}>
             <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
               <input type="text" value={input}
                 onChange={function(e) { setInput(e.target.value); }}
@@ -471,25 +444,14 @@ export default function Home() {
                 style={{ padding: '10px 24px', background: C.darkBg, color: '#F1EFE8', border: 'none', fontSize: 12, fontFamily: SANS, fontWeight: 500, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                 {scanning ? 'Scanning...' : 'Scan'}
               </button>
-              {results.length > 0 && (
-                <button onClick={doRefresh} disabled={scanning}
-                  style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>Refresh</button>
-              )}
-              {results.length > 0 && (
-                <button onClick={function() { setResults([]); tickersRef.current=[]; setUpdatedAt(''); }}
-                  style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>Clear</button>
-              )}
+              {results.length > 0 && <button onClick={doRefresh} disabled={scanning} style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>Refresh</button>}
+              {results.length > 0 && <button onClick={function() { setResults([]); tickersRef.current=[]; setUpdatedAt(''); }} style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>Clear</button>}
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
               <span style={{ fontSize: 9, color: C.txLight, fontFamily: SANS, letterSpacing: '0.12em', textTransform: 'uppercase', marginRight: 4 }}>Sectors</span>
               {Object.keys(PRESETS).map(function(name) {
                 var active = activePreset === name;
-                return (
-                  <button key={name} onClick={function() { setInput(PRESETS[name]); setActivePreset(name); }}
-                    style={{ padding: '4px 12px', fontSize: 10, fontFamily: SANS, letterSpacing: '0.06em', background: active ? C.darkBg : 'transparent', color: active ? '#F1EFE8' : C.txMid, border: '0.5px solid ' + (active ? C.darkBg : C.borderDk), borderRadius: 0, whiteSpace: 'nowrap' }}>
-                    {name}
-                  </button>
-                );
+                return <button key={name} onClick={function() { setInput(PRESETS[name]); setActivePreset(name); }} style={{ padding: '4px 12px', fontSize: 10, fontFamily: SANS, letterSpacing: '0.06em', background: active ? C.darkBg : 'transparent', color: active ? '#F1EFE8' : C.txMid, border: '0.5px solid ' + (active ? C.darkBg : C.borderDk), borderRadius: 0, whiteSpace: 'nowrap' }}>{name}</button>;
               })}
             </div>
           </div>
@@ -498,20 +460,11 @@ export default function Home() {
             <span style={{ fontSize: 9, color: C.txLight, fontFamily: SANS, letterSpacing: '0.12em', textTransform: 'uppercase', marginRight: 4 }}>Filter</span>
             {[['all','All'],['strong','Strong 5-6'],['mod','Moderate 3-4'],['weak','Weak 0-2'],['us','US'],['intl','International']].map(function(kl) {
               var active = filter === kl[0];
-              return (
-                <button key={kl[0]} onClick={function() { setFilter(kl[0]); }}
-                  style={{ padding: '4px 12px', fontSize: 10, fontFamily: SANS, letterSpacing: '0.06em', background: active ? C.accentDk : 'transparent', color: active ? '#F1EFE8' : C.txMid, border: '0.5px solid ' + (active ? C.accentDk : C.borderDk), borderRadius: 0 }}>
-                  {kl[1]}
-                </button>
-              );
+              return <button key={kl[0]} onClick={function() { setFilter(kl[0]); }} style={{ padding: '4px 12px', fontSize: 10, fontFamily: SANS, letterSpacing: '0.06em', background: active ? C.accentDk : 'transparent', color: active ? '#F1EFE8' : C.txMid, border: '0.5px solid ' + (active ? C.accentDk : C.borderDk), borderRadius: 0 }}>{kl[1]}</button>;
             })}
           </div>
  
-          {scanning && (
-            <div style={{ height: 2, background: C.border, marginBottom: 16, overflow: 'hidden' }}>
-              <div style={{ height: '100%', background: C.gold, width: progress + '%', transition: 'width 0.4s' }}/>
-            </div>
-          )}
+          {scanning && <div style={{ height: 2, background: C.border, marginBottom: 16, overflow: 'hidden' }}><div style={{ height: '100%', background: C.gold, width: progress + '%', transition: 'width 0.4s' }}/></div>}
           {status && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: status.startsWith('Error') ? C.red : C.txMid, fontFamily: MONO, marginBottom: 12 }}>
               {scanning && <div style={{ width: 11, height: 11, border: '1.5px solid ' + C.border, borderTopColor: C.gold, borderRadius: '50%', flexShrink: 0, animation: 'spin 0.7s linear infinite' }}/>}
