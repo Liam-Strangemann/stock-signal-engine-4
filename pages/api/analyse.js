@@ -348,7 +348,7 @@ async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
     };
  
     if (targetPE && targetPE > 0) {
-      result.diff = parseFloat(((targetPE - medianPE) / medianPE * 100).toFixed(1));
+      result.diff = parseFloat(((targetPE - avgPE) / avgPE * 100).toFixed(1));
     }
  
     return result;
@@ -474,11 +474,11 @@ function evaluate(ticker, d) {
   try {
     const pp = d.peerPE;
     if (pp && pp.medianPE && pp.diff !== null) {
-      if (pp.diff < -8)       s6 = { status:'pass', value:`${Math.abs(pp.diff).toFixed(0)}% < peer med ${pp.medianPE}x` };
-      else if (pp.diff > 8)   s6 = { status:'fail', value:`${Math.abs(pp.diff).toFixed(0)}% > peer med ${pp.medianPE}x` };
-      else                    s6 = { status:'neutral', value:`In line, med ${pp.medianPE}x` };
+      if (pp.diff < -8)       s6 = { status:'pass', value:`${Math.abs(pp.diff).toFixed(0)}% < peer avg ${pp.avgPE}x` };
+      else if (pp.diff > 8)   s6 = { status:'fail', value:`${Math.abs(pp.diff).toFixed(0)}% > peer avg ${pp.avgPE}x` };
+      else                    s6 = { status:'neutral', value:`In line, avg ${pp.avgPE}x` };
     } else if (pp && pp.medianPE) {
-      s6 = { status:'neutral', value:`Peer med ${pp.medianPE}x` };
+      s6 = { status:'neutral', value:`Peer avg ${pp.avgPE}x` };
     }
   } catch(_) {}
  
