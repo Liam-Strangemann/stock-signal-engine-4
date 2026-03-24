@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "pages/api/top3.js": {
+      "maxDuration": 60
+    }
+  }
+}
