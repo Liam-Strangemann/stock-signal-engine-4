@@ -1,182 +1,148 @@
 // pages/api/top3.js
 
+// ===== CONFIG =====
+const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+const MAX_RUNTIME = 9000; // 9 seconds safety
+
+// ===== SIMPLE IN-MEMORY CACHE =====
+let CACHE = {
+  data: null,
+  timestamp: 0
+};
+
+// ===== TICKERS =====
 const TICKERS = [
   'AAPL','MSFT','NVDA','AMZN','GOOGL','META','TSLA','AVGO','ORCL','ADBE',
   'CRM','AMD','QCOM','TXN','INTC','MU','AMAT','KLAC','LRCX','MCHP',
   'ADI','NXPI','CDNS','SNPS','FTNT','PANW','CRWD','NOW','SNOW','PLTR',
   'JPM','BAC','WFC','GS','MS','BLK','C','AXP','SCHW','USB',
-  'PNC','TFC','COF','MET','PRU','AFL','ALL','TRV','AIG','MCO',
-  'SPGI','ICE','CME','MSCI','CBOE',
-  'LLY','JNJ','UNH','ABBV','MRK','PFE','TMO','ABT','AMGN','CVS',
-  'MDT','ISRG','GILD','REGN','VRTX','BSX','SYK','EW','DXCM','IDXX',
-  'IQV','MCK','ELV','CI','HUM','HCA',
-  'HD','MCD','NKE','SBUX','LOW','TGT','COST','BKNG','MAR','HLT',
-  'YUM','CMG','DPZ','ROST','TJX','GM','F','UBER',
-  'WMT','KO','PEP','PG','PM','MO','MDLZ','CL','KMB','GIS','STZ',
-  'XOM','CVX','COP','EOG','SLB','OXY','DVN','HAL','MPC','PSX','VLO','BKR',
-  'GE','HON','CAT','DE','BA','LMT','RTX','NOC','GD','UPS',
-  'FDX','MMM','EMR','ETN','PH','ITW','ROK','NSC','UNP','CSX',
-  'LIN','APD','SHW','ECL','NEM','FCX','NUE','VMC','MLM','DOW',
-  'NEE','DUK','SO','D','AEP','EXC','SRE','CEG',
-  'PLD','AMT','EQIX','CCI','PSA','O','WELL','AVB','DLR',
-  'NFLX','DIS','CMCSA','T','VZ','TMUS','CHTR',
-  'V','MA','PYPL','ACN','IBM','FICO','ROP','VRSK',
-  'DHR','SPGI','ZTS','IDXX','MTD','BIO','A','ILMN',
-  'NKE','LULU','PVH','HBI','RL','TPR','VFC',
-  'ABNB','EXPE','LYFT','UAL','DAL','AAL','LUV','CCL','RCL','NCLH',
+  'LLY','JNJ','UNH','XOM','CVX','WMT','KO','PEP','PG','COST',
+  'HD','MCD','NKE','SBUX','DIS','NFLX','V','MA','PYPL','UBER'
 ];
 
-const UNIQ_TICKERS = [...new Set(TICKERS)].filter(t => t && t.length <= 5);
+const UNIQ_TICKERS = [...new Set(TICKERS)];
 
-// ✅ SAFE FETCH (fixes AbortSignal issues on Vercel)
-async function safeFetch(url, options = {}, timeout = 10000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch (e) {
-    clearTimeout(id);
-    throw e;
-  }
-}
-
-async function yahooQuoteBatch(tickers) {
-  const fields = 'symbol,shortName,regularMarketPrice,regularMarketChangePercent,marketCap,trailingPE,fiftyDayAverage,fiftyTwoWeekHigh,fiftyTwoWeekLow,epsTrailingTwelveMonths,averageAnalystRating';
-
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(',')}&fields=${fields}`;
-
-  const res = await safeFetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      'Accept': 'application/json',
-      'Referer': 'https://finance.yahoo.com',
-    }
+// ===== YAHOO BULK FETCH =====
+async function yahooBatch(tickers) {
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(',')}`;
+  
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(5000)
   });
 
-  if (!res.ok) throw new Error('Yahoo ' + res.status);
+  if (!res.ok) throw new Error('Yahoo error');
 
   const json = await res.json();
   return json?.quoteResponse?.result || [];
 }
 
-function scoreQuote(q) {
-  if (!q?.symbol) return null;
+// ===== SCORING ENGINE =====
+function scoreStock(q) {
+  if (!q || !q.symbol) return null;
 
   const px = q.regularMarketPrice;
   const pe = q.trailingPE;
   const ma50 = q.fiftyDayAverage;
   const hi = q.fiftyTwoWeekHigh;
   const lo = q.fiftyTwoWeekLow;
-  const eps = q.epsTrailingTwelveMonths;
 
-  if (!px || px <= 0) return null;
+  if (!px) return null;
 
   let score = 0;
 
-  if (pe && pe > 0 && pe < 200 && eps && eps > 0 && hi && lo) {
-    const histPE = ((hi + lo) / 2) / eps;
-    if (pe < histPE * 0.92) score++;
-  }
-
+  if (pe && pe < 25) score++;
   if (ma50 && px <= ma50) score++;
-  if (pe && pe > 0 && pe < 25) score++;
-
-  if (hi && lo) {
-    const mid = (hi + lo) / 2;
-    if (px < mid) score++;
-  }
+  if (hi && lo && px < (hi + lo) / 2) score++;
 
   return {
     ticker: q.symbol,
-    company: q.shortName || q.symbol,
-    score,
-    px,
-    pe,
-    ma50,
-    chg: q.regularMarketChangePercent,
-    mc: q.marketCap,
-    hi52: hi,
-    lo52: lo,
-    eps,
-    analystRating: q.averageAnalystRating || null,
+    price: px,
+    score
   };
 }
 
-async function getTargetPrice(ticker) {
+// ===== LIGHTWEIGHT TOP 3 =====
+function getTop3(quotes) {
+  const scored = quotes
+    .map(scoreStock)
+    .filter(Boolean)
+    .sort((a,b) => b.score - a.score);
+
+  return scored.slice(0,3);
+}
+
+// ===== OPTIONAL DETAIL FETCH =====
+async function getExtra(ticker) {
   try {
-    const res = await safeFetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData`);
-    if (!res.ok) return null;
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData`,
+      { signal: AbortSignal.timeout(4000) }
+    );
+    const json = await res.json();
+    const fd = json?.quoteSummary?.result?.[0]?.financialData;
 
-    const j = await res.json();
-    const fd = j?.quoteSummary?.result?.[0]?.financialData;
-
-    return fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw || null;
+    return {
+      target: fd?.targetMeanPrice?.raw || null
+    };
   } catch {
-    return null;
+    return {};
   }
 }
 
-async function buildFullResult(q) {
-  const ticker = q.ticker;
-  const px = q.px;
-
-  const tgt = await getTargetPrice(ticker);
-
-  return {
-    ticker,
-    company: q.company,
-    price: `$${px.toFixed(2)}`,
-    pe: q.pe,
-    score: q.score,
-    target: tgt,
-    upside: tgt ? ((tgt - px) / px * 100).toFixed(1) + '%' : null,
-    updatedAt: new Date().toISOString()
-  };
-}
-
+// ===== MAIN HANDLER =====
 export default async function handler(req, res) {
-  if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
+  const now = Date.now();
+
+  // ✅ RETURN CACHE
+  if (CACHE.data && (now - CACHE.timestamp < CACHE_TTL)) {
+    return res.status(200).json({
+      ...CACHE.data,
+      cached: true
+    });
+  }
+
+  const start = Date.now();
 
   try {
-    const batchSize = 80;
-    const batches = [];
+    // ===== STEP 1: BULK FETCH =====
+    const quotes = await yahooBatch(UNIQ_TICKERS);
 
-    for (let i = 0; i < UNIQ_TICKERS.length; i += batchSize) {
-      batches.push(UNIQ_TICKERS.slice(i, i + batchSize));
-    }
-
-    const batchResults = await Promise.allSettled(batches.map(yahooQuoteBatch));
-
-    let allQuotes = [];
-    batchResults.forEach(r => {
-      if (r.status === 'fulfilled') {
-        allQuotes = allQuotes.concat(r.value);
-      }
-    });
-
-    if (!allQuotes.length) {
+    if (!quotes.length) {
       return res.status(200).json({ top3: [], error: 'No data' });
     }
 
-    const scored = allQuotes
-      .map(scoreQuote)
-      .filter(Boolean)
-      .sort((a, b) => b.score - a.score);
+    // ===== STEP 2: SCORE =====
+    const top3 = getTop3(quotes);
 
-    const top3 = await Promise.all(
-      scored.slice(0, 3).map(buildFullResult)
+    // ===== STEP 3: ADD LIGHT DETAILS (SAFE) =====
+    const enriched = await Promise.all(
+      top3.map(async (s) => {
+        if (Date.now() - start > MAX_RUNTIME) return s;
+
+        const extra = await getExtra(s.ticker);
+        return { ...s, ...extra };
+      })
     );
 
-    return res.status(200).json({
-      top3,
-      totalScanned: scored.length,
-      updatedAt: new Date().toISOString()
-    });
+    const result = {
+      top3: enriched,
+      scanned: quotes.length,
+      generatedAt: new Date().toISOString()
+    };
+
+    // ✅ SAVE CACHE
+    CACHE = {
+      data: result,
+      timestamp: Date.now()
+    };
+
+    return res.status(200).json(result);
 
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({
+      error: e.message,
+      fallback: CACHE.data || null
+    });
   }
 }
