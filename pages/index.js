@@ -30,6 +30,9 @@ var C = {
   tx:        '#2C2C2A',  // near-black body text
   txMid:     '#5F5E56',  // medium taupe text
   txLight:   '#9A9890',  // light taupe text
+  amber:     '#B8903A',  // amber for neutral/average
+  amberBg:   '#F5EDD0',
+  amberBd:   '#D4B870',
   green:     '#4A6741',  // muted olive green (pass)
   greenBg:   '#DDE8D8',
   greenBd:   '#A8C0A0',
@@ -69,10 +72,10 @@ function ScoreDots({ score, max }) {
 }
  
 function SigPill({ sig }) {
-  var bg    = sig.status === 'pass' ? C.greenBg  : sig.status === 'fail' ? C.redBg  : C.cardBg;
-  var color = sig.status === 'pass' ? C.green    : sig.status === 'fail' ? C.red    : C.txMid;
-  var bd    = sig.status === 'pass' ? C.greenBd  : sig.status === 'fail' ? C.redBd  : C.border;
-  var dot   = sig.status === 'pass' ? C.green    : sig.status === 'fail' ? C.red    : C.txLight;
+  var bg    = sig.status === 'pass' ? C.greenBg  : sig.status === 'fail' ? C.redBg  : C.amberBg;
+  var color = sig.status === 'pass' ? C.green    : sig.status === 'fail' ? C.red    : C.amber;
+  var bd    = sig.status === 'pass' ? C.greenBd  : sig.status === 'fail' ? C.redBd  : C.amberBd;
+  var dot   = sig.status === 'pass' ? C.green    : sig.status === 'fail' ? C.red    : C.amber;
   return (
     <div style={{ background: bg, border: '0.5px solid ' + bd, borderRadius: 6, padding: '5px 7px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3 }}>
