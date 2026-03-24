@@ -16,7 +16,6 @@ var SIG_LABELS = ['EPS & Rev beat', 'PE vs hist avg', 'Price vs 50d MA', 'Inside
  
 var US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,GM,F,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,WBA'.split(','));
  
-// Exchange map for custom scan results (analyse.js doesn't return an exchange field)
 var EXCHANGE_MAP = {
   AAPL:'NASDAQ',MSFT:'NASDAQ',GOOGL:'NASDAQ',AMZN:'NASDAQ',META:'NASDAQ',
   NVDA:'NASDAQ',TSLA:'NASDAQ',AVGO:'NASDAQ',COST:'NASDAQ',INTC:'NASDAQ',
@@ -46,27 +45,27 @@ function getExchange(stock) {
 }
  
 var C = {
-  pageBg:    '#F1EFE8',
-  cardBg:    '#E8E5DC',
-  darkBg:    '#5F5E56',
-  deepBg:    '#3A3832',
-  accent:    '#8B7D6B',
-  accentDk:  '#6B5D4F',
-  gold:      '#B8A070',
-  border:    'rgba(95,94,86,0.2)',
-  borderDk:  'rgba(95,94,86,0.4)',
-  tx:        '#2C2C2A',
-  txMid:     '#5F5E56',
-  txLight:   '#9A9890',
-  amber:     '#B8903A',
-  amberBg:   '#F5EDD0',
-  amberBd:   '#D4B870',
-  green:     '#4A6741',
-  greenBg:   '#DDE8D8',
-  greenBd:   '#A8C0A0',
-  red:       '#7A3A30',
-  redBg:     '#F0DDD9',
-  redBd:     '#C8A09A',
+  pageBg:   '#F1EFE8',
+  cardBg:   '#E8E5DC',
+  darkBg:   '#5F5E56',
+  deepBg:   '#3A3832',
+  accent:   '#8B7D6B',
+  accentDk: '#6B5D4F',
+  gold:     '#B8A070',
+  border:   'rgba(95,94,86,0.2)',
+  borderDk: 'rgba(95,94,86,0.4)',
+  tx:       '#2C2C2A',
+  txMid:    '#5F5E56',
+  txLight:  '#9A9890',
+  amber:    '#B8903A',
+  amberBg:  '#F5EDD0',
+  amberBd:  '#D4B870',
+  green:    '#4A6741',
+  greenBg:  '#DDE8D8',
+  greenBd:  '#A8C0A0',
+  red:      '#7A3A30',
+  redBg:    '#F0DDD9',
+  redBd:    '#C8A09A',
 };
  
 var FONTS = "'Cormorant Garamond', 'Georgia', serif";
@@ -119,46 +118,35 @@ function SigPill({ sig }) {
   );
 }
  
-// ── Score display — DM Mono, tabular figures, all characters same width ───────
-// This ensures "2/6" and "6/6" look balanced with no size difference.
-function ScoreDisplay({ score, size, color }) {
+// Score with equal-width DM Mono digits
+function ScoreDisplay({ score, size }) {
   var sc = Math.min(score || 0, 6);
-  var c  = color || (sc >= 5 ? C.gold : sc >= 4 ? '#A8C080' : sc >= 3 ? '#C8A870' : C.txLight);
+  var c  = sc >= 5 ? C.gold : sc >= 4 ? '#A8C080' : sc >= 3 ? '#C8A870' : C.txLight;
   return (
-    <span style={{
-      fontFamily:     MONO,
-      fontSize:       size || 22,
-      fontWeight:     400,
-      letterSpacing:  '0.05em',
-      fontVariantNumeric: 'tabular-nums',
-      color:          c,
-      lineHeight:     1,
-    }}>
+    <span style={{ fontFamily: MONO, fontSize: size || 22, fontWeight: 400, letterSpacing: '0.05em', fontVariantNumeric: 'tabular-nums', color: c, lineHeight: 1 }}>
       {sc}<span style={{ opacity: 0.5, margin: '0 1px' }}>/</span>6
     </span>
   );
 }
  
-// ── Large feature card for Top 3 picks ───────────────────────────────────────
+// ── Large feature card for Top 3 ─────────────────────────────────────────────
 function FeatureCard({ stock, rank }) {
   if (!stock) return null;
   var sc       = Math.min(stock.score || 0, 6);
   var chgPos   = stock.change && stock.change.startsWith('+');
   var medals   = ['I', 'II', 'III'];
   var exchange = getExchange(stock);
+  var timeStr  = stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : '';
  
   return (
     <div style={{
-      background:  C.deepBg,
-      border:      '1px solid ' + C.accent,
-      borderTop:   '3px solid ' + C.gold,
-      borderRadius: 2,
-      padding:     '24px 22px',
-      position:    'relative',
-      flex:         1,
-      minWidth:     0,
+      background: C.deepBg, border: '1px solid ' + C.accent,
+      borderTop: '3px solid ' + C.gold, borderRadius: 2,
+      padding: '24px 22px', position: 'relative', flex: 1, minWidth: 0,
     }}>
+      {/* Top row: rank label (left) | timestamp + score + dots (right, stacked) */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16 }}>
+        {/* Left: rank + ticker + exchange + company */}
         <div>
           <div style={{ fontSize: 10, color: C.gold, fontFamily: SANS, letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 6 }}>
             {'Rank ' + medals[rank - 1]}
@@ -167,40 +155,33 @@ function FeatureCard({ stock, rank }) {
             <span style={{ fontSize: 26, fontWeight: 700, fontFamily: FONTS, color: '#F1EFE8', letterSpacing: '0.02em' }}>
               {stock.ticker}
             </span>
-            <span style={{
-              fontSize: 9, fontFamily: SANS, padding: '2px 6px', borderRadius: 2,
-              letterSpacing: '0.08em', background: 'rgba(184,160,112,0.15)',
-              color: C.gold, border: '0.5px solid ' + C.gold,
-            }}>
+            <span style={{ fontSize: 9, fontFamily: SANS, padding: '2px 6px', borderRadius: 2, letterSpacing: '0.08em', background: 'rgba(184,160,112,0.15)', color: C.gold, border: '0.5px solid ' + C.gold }}>
               {exchange}
             </span>
           </div>
           <div style={{ fontSize: 12, color: C.txLight, fontFamily: SANS }}>{stock.company || ''}</div>
         </div>
-        <div style={{ textAlign: 'right' }}>
-          <ScoreDisplay score={sc} size={24}/>
-          <div style={{ marginTop: 6, display: 'flex', justifyContent: 'flex-end' }}>
-            <ScoreDots score={sc} max={6}/>
+ 
+        {/* Right: timestamp directly above score, then dots — all right-aligned */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+          <div style={{ fontSize: 9, color: 'rgba(154,152,144,0.55)', fontFamily: MONO, letterSpacing: '0.04em' }}>
+            {timeStr}
           </div>
+          <ScoreDisplay score={sc} size={24}/>
+          <ScoreDots score={sc} max={6}/>
         </div>
       </div>
  
+      {/* Price row */}
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 18, fontFamily: SANS, fontWeight: 500, color: '#F1EFE8' }}>
           {stock.price || '--'}
-          {stock.change && (
-            <span style={{ fontSize: 12, marginLeft: 8, color: chgPos ? '#80C080' : C.red }}>
-              {stock.change}
-            </span>
-          )}
-          {stock.marketCap && (
-            <span style={{ fontSize: 11, marginLeft: 8, color: C.txLight, fontWeight: 400 }}>
-              {stock.marketCap}
-            </span>
-          )}
+          {stock.change && <span style={{ fontSize: 12, marginLeft: 8, color: chgPos ? '#80C080' : C.red }}>{stock.change}</span>}
+          {stock.marketCap && <span style={{ fontSize: 11, marginLeft: 8, color: C.txLight, fontWeight: 400 }}>{stock.marketCap}</span>}
         </div>
       </div>
  
+      {/* Signal pills */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5, marginBottom: 14 }}>
         {SIG_LABELS.map(function(label, i) {
           var sig = (stock.signals || [])[i] || {};
@@ -208,69 +189,43 @@ function FeatureCard({ stock, rank }) {
         })}
       </div>
  
+      {/* Summary */}
       <div style={{ padding: '10px 12px', background: 'rgba(241,239,232,0.04)', borderRadius: 2, border: '0.5px solid rgba(184,160,112,0.2)' }}>
         <span style={{ fontSize: 11, color: C.txLight, fontFamily: SANS, lineHeight: 1.55 }}>
           {stock.summary || ''}
         </span>
       </div>
- 
-      <div style={{ position: 'absolute', top: 14, right: 18, fontSize: 9, color: 'rgba(154,152,144,0.5)', fontFamily: MONO }}>
-        {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
-      </div>
     </div>
   );
 }
  
-// ── Compact card for custom scan results ─────────────────────────────────────
+// ── Compact result card for custom scan ───────────────────────────────────────
 function ResultCard({ stock, rank }) {
   var sc       = Math.min(stock.score || 0, 6);
   var rating   = getRating(sc);
   var chgPos   = stock.change && stock.change.startsWith('+');
   var exchange = getExchange(stock);
-  var rnkBg    = rank === 1
-    ? { bg: C.gold,    color: '#2C2C2A' }
-    : rank === 2
-      ? { bg: C.accent,   color: '#F1EFE8' }
-      : rank === 3
-        ? { bg: C.accentDk, color: '#F1EFE8' }
-        : { bg: C.border,   color: C.txMid  };
+  var rnkBg    = rank === 1 ? { bg: C.gold, color: '#2C2C2A' }
+               : rank === 2 ? { bg: C.accent, color: '#F1EFE8' }
+               : rank === 3 ? { bg: C.accentDk, color: '#F1EFE8' }
+               :              { bg: C.border, color: C.txMid };
  
   return (
     <div style={{
-      background:   C.cardBg,
-      border:       '0.5px solid ' + C.borderDk,
-      borderLeft:   '3px solid ' + (sc >= 5 ? C.gold : sc >= 4 ? C.green : sc >= 3 ? '#B8903A' : C.borderDk),
-      borderRadius: 2,
-      padding:      '14px 16px',
+      background: C.cardBg, border: '0.5px solid ' + C.borderDk,
+      borderLeft: '3px solid ' + (sc >= 5 ? C.gold : sc >= 4 ? C.green : sc >= 3 ? '#B8903A' : C.borderDk),
+      borderRadius: 2, padding: '14px 16px',
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 26, height: 26, borderRadius: 2,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 11, fontWeight: 600, fontFamily: MONO, flexShrink: 0,
-            background: rnkBg.bg, color: rnkBg.color,
-          }}>
+          <div style={{ width: 26, height: 26, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600, fontFamily: MONO, flexShrink: 0, background: rnkBg.bg, color: rnkBg.color }}>
             {rank}
           </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONTS, letterSpacing: '0.02em', color: C.tx }}>
-                {stock.ticker}
-              </span>
-              <span style={{
-                fontSize: 8, fontFamily: SANS, padding: '2px 5px', borderRadius: 2,
-                letterSpacing: '0.06em', background: C.darkBg, color: '#F1EFE8',
-              }}>
-                {exchange}
-              </span>
-              <span style={{
-                fontSize: 9, fontFamily: SANS, fontWeight: 600, padding: '2px 8px',
-                borderRadius: 20, letterSpacing: '0.06em', textTransform: 'uppercase',
-                background: rating.bg, color: rating.color, border: '0.5px solid ' + rating.border,
-              }}>
-                {rating.label}
-              </span>
+              <span style={{ fontSize: 16, fontWeight: 700, fontFamily: FONTS, letterSpacing: '0.02em', color: C.tx }}>{stock.ticker}</span>
+              <span style={{ fontSize: 8, fontFamily: SANS, padding: '2px 5px', borderRadius: 2, letterSpacing: '0.06em', background: C.darkBg, color: '#F1EFE8' }}>{exchange}</span>
+              <span style={{ fontSize: 9, fontFamily: SANS, fontWeight: 600, padding: '2px 8px', borderRadius: 20, letterSpacing: '0.06em', textTransform: 'uppercase', background: rating.bg, color: rating.color, border: '0.5px solid ' + rating.border }}>{rating.label}</span>
             </div>
             <div style={{ fontSize: 11, color: C.txMid, marginTop: 2, fontFamily: SANS }}>{stock.company || ''}</div>
             {stock.price && (
@@ -282,7 +237,11 @@ function ResultCard({ stock, rank }) {
             )}
           </div>
         </div>
-        <div style={{ textAlign: 'right', flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+        {/* Score column: timestamp above score, then dots */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+          <div style={{ fontSize: 9, color: C.txLight, fontFamily: MONO }}>
+            {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
+          </div>
           <ScoreDisplay score={sc} size={20}/>
           <ScoreDots score={sc} max={6}/>
         </div>
@@ -314,35 +273,16 @@ function ResultCard({ stock, rank }) {
  
 export default function Home() {
   var inputState      = useState('');
-  var input           = inputState[0];
-  var setInput        = inputState[1];
-  var resultsState    = useState([]);
-  var results         = resultsState[0];
-  var setResults      = resultsState[1];
-  var scanningState   = useState(false);
-  var scanning        = scanningState[0];
-  var setScanning     = scanningState[1];
-  var statusState     = useState('');
-  var status          = statusState[0];
-  var setStatus       = statusState[1];
-  var progressState   = useState(0);
-  var progress        = progressState[0];
-  var setProgress     = progressState[1];
-  var filterState     = useState('all');
-  var filter          = filterState[0];
-  var setFilter       = filterState[1];
-  var updatedState    = useState('');
-  var updatedAt       = updatedState[0];
-  var setUpdatedAt    = updatedState[1];
-  var presetState     = useState('');
-  var activePreset    = presetState[0];
-  var setActivePreset = presetState[1];
-  var top3State       = useState(null);
-  var top3            = top3State[0];
-  var setTop3         = top3State[1];
-  var top3LoadState   = useState(false);
-  var top3Loading     = top3LoadState[0];
-  var setTop3Loading  = top3LoadState[1];
+  var input           = inputState[0]; var setInput = inputState[1];
+  var resultsState    = useState([]); var results = resultsState[0]; var setResults = resultsState[1];
+  var scanningState   = useState(false); var scanning = scanningState[0]; var setScanning = scanningState[1];
+  var statusState     = useState(''); var status = statusState[0]; var setStatus = statusState[1];
+  var progressState   = useState(0); var progress = progressState[0]; var setProgress = progressState[1];
+  var filterState     = useState('all'); var filter = filterState[0]; var setFilter = filterState[1];
+  var updatedState    = useState(''); var updatedAt = updatedState[0]; var setUpdatedAt = updatedState[1];
+  var presetState     = useState(''); var activePreset = presetState[0]; var setActivePreset = presetState[1];
+  var top3State       = useState(null); var top3 = top3State[0]; var setTop3 = top3State[1];
+  var top3LoadState   = useState(false); var top3Loading = top3LoadState[0]; var setTop3Loading = top3LoadState[1];
   var timerRef        = useRef(null);
   var tickersRef      = useRef([]);
  
@@ -353,7 +293,7 @@ export default function Home() {
     return fetch('/api/analyse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tickers: tickers }),
+      body: JSON.stringify({ tickers }),
     }).then(function(res) {
       if (!res.ok) return res.json().then(function(e) { throw new Error(e.error || 'HTTP ' + res.status); });
       return res.json();
@@ -407,19 +347,14 @@ export default function Home() {
     var hdr  = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS','PE_hist','vs50dMA','Insider','Analyst','PE_peers','Summary'];
     var rows = filtered.map(function(r, i) {
       var g = r.signals || [];
-      return [
-        i+1, r.ticker, '"'+(r.company||'').replace(/"/g,'""')+'"', r.score||0,
-        r.price||'', r.change||'', r.marketCap||'',
+      return [i+1, r.ticker, '"'+(r.company||'').replace(/"/g,'""')+'"', r.score||0, r.price||'', r.change||'', r.marketCap||'',
         g[0]?g[0].value||'':'', g[1]?g[1].value||'':'', g[2]?g[2].value||'':'',
         g[3]?g[3].value||'':'', g[4]?g[4].value||'':'', g[5]?g[5].value||'':'',
-        '"'+(r.summary||'').replace(/"/g,'""')+'"',
-      ].join(',');
+        '"'+(r.summary||'').replace(/"/g,'""')+'"'].join(',');
     });
     var blob = new Blob([[hdr.join(',')].concat(rows).join('\n')], { type: 'text/csv' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'signals_' + new Date().toISOString().slice(0, 10) + '.csv';
-    a.click();
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'signals_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
   }
  
   var top3Stocks   = top3 && top3.top3        ? top3.top3        : [];
@@ -452,7 +387,7 @@ export default function Home() {
  
       <div style={{ background: C.pageBg, minHeight: '100vh', color: C.tx, fontFamily: SANS }}>
  
-        {/* ── Header ── */}
+        {/* Header */}
         <div style={{ background: C.deepBg, borderBottom: '1px solid rgba(184,160,112,0.3)', padding: '0 32px' }}>
           <div style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 64 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
@@ -460,12 +395,8 @@ export default function Home() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill={C.gold}><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
               </div>
               <div>
-                <div style={{ fontSize: 18, fontFamily: FONTS, fontWeight: 600, color: '#F1EFE8', letterSpacing: '0.08em' }}>
-                  SIGNAL ENGINE
-                </div>
-                <div style={{ fontSize: 9, color: C.gold, fontFamily: SANS, letterSpacing: '0.18em', textTransform: 'uppercase', marginTop: 1 }}>
-                  Equity Undervalue Scanner
-                </div>
+                <div style={{ fontSize: 18, fontFamily: FONTS, fontWeight: 600, color: '#F1EFE8', letterSpacing: '0.08em' }}>SIGNAL ENGINE</div>
+                <div style={{ fontSize: 9, color: C.gold, fontFamily: SANS, letterSpacing: '0.18em', textTransform: 'uppercase', marginTop: 1 }}>Equity Undervalue Scanner</div>
               </div>
             </div>
             <div style={{ textAlign: 'right', fontSize: 10, color: C.txLight, fontFamily: MONO, lineHeight: 1.8 }}>
@@ -480,23 +411,21 @@ export default function Home() {
  
         <div style={{ maxWidth: 1200, margin: '0 auto', padding: '32px 32px 80px' }}>
  
-          {/* ── Top 3 Picks ── */}
+          {/* Top 3 */}
           <div style={{ marginBottom: 40 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 20 }}>
-              <h2 style={{ fontSize: 36, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em' }}>
-                Top Picks Today
-              </h2>
+              <h2 style={{ fontSize: 36, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em' }}>Top Picks Today</h2>
               <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
               <div style={{ fontSize: 10, color: C.txLight, fontFamily: SANS, letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
-                {top3Loading ? 'Scanning watchlist...' : scannedTotal > 0 ? scannedTotal + ' securities screened' : ''}
+                {top3Loading ? 'Scanning universe...' : scannedTotal > 0 ? scannedTotal + ' securities screened' : ''}
               </div>
             </div>
  
             {top3Loading && (
               <div style={{ display: 'flex', gap: 16 }}>
-                {[0, 1, 2].map(function(i) {
+                {[0,1,2].map(function(i) {
                   return (
-                    <div key={i} style={{ flex: 1, background: C.cardBg, border: '0.5px solid ' + C.border, borderTop: '3px solid ' + C.border, borderRadius: 2, padding: '24px 22px', animation: 'shimmer 1.5s infinite', animationDelay: (i * 0.2) + 's' }}>
+                    <div key={i} style={{ flex: 1, background: C.cardBg, border: '0.5px solid ' + C.border, borderTop: '3px solid ' + C.border, borderRadius: 2, padding: '24px 22px', animation: 'shimmer 1.5s infinite', animationDelay: (i*0.2)+'s' }}>
                       <div style={{ fontSize: 10, color: C.txLight, fontFamily: SANS, letterSpacing: '0.1em', marginBottom: 8 }}>Rank {['I','II','III'][i]}</div>
                       <div style={{ width: 80, height: 28, background: C.border, borderRadius: 2, marginBottom: 8 }}/>
                       <div style={{ width: 140, height: 12, background: C.border, borderRadius: 2 }}/>
@@ -511,7 +440,7 @@ export default function Home() {
                 {top3Stocks.map(function(stock, i) {
                   return (
                     <div key={stock.ticker} className="card-anim" style={{ flex: 1, minWidth: 0 }}>
-                      <FeatureCard stock={stock} rank={i + 1}/>
+                      <FeatureCard stock={stock} rank={i+1}/>
                     </div>
                   );
                 })}
@@ -520,20 +449,17 @@ export default function Home() {
  
             {!top3Loading && top3Stocks.length === 0 && (
               <div style={{ padding: '32px', background: C.cardBg, border: '0.5px solid ' + C.border, borderRadius: 2, textAlign: 'center', color: C.txLight, fontFamily: SANS, fontSize: 13 }}>
-                Top picks are loading in the background. This scan covers ~60 securities and may take up to 30 seconds on first load.
+                Scanning ~300 securities — first load takes 30–60 seconds. Subsequent loads are instant from cache.
               </div>
             )}
           </div>
  
-          {/* ── Custom Scan divider ── */}
+          {/* Custom Scan */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 32 }}>
-            <h2 style={{ fontSize: 36, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
-              Custom Scan
-            </h2>
+            <h2 style={{ fontSize: 36, fontFamily: FONTS, fontWeight: 600, color: C.tx, letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>Custom Scan</h2>
             <div style={{ height: '0.5px', flex: 1, background: C.borderDk }}/>
           </div>
  
-          {/* ── Search & Presets ── */}
           <div style={{ background: C.cardBg, border: '0.5px solid ' + C.borderDk, padding: '20px 20px', marginBottom: 20 }}>
             <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
               <input type="text" value={input}
@@ -547,15 +473,11 @@ export default function Home() {
               </button>
               {results.length > 0 && (
                 <button onClick={doRefresh} disabled={scanning}
-                  style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>
-                  Refresh
-                </button>
+                  style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>Refresh</button>
               )}
               {results.length > 0 && (
-                <button onClick={function() { setResults([]); tickersRef.current = []; setUpdatedAt(''); }}
-                  style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>
-                  Clear
-                </button>
+                <button onClick={function() { setResults([]); tickersRef.current=[]; setUpdatedAt(''); }}
+                  style={{ padding: '10px 16px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 12, fontFamily: SANS }}>Clear</button>
               )}
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -572,7 +494,6 @@ export default function Home() {
             </div>
           </div>
  
-          {/* ── Filters ── */}
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
             <span style={{ fontSize: 9, color: C.txLight, fontFamily: SANS, letterSpacing: '0.12em', textTransform: 'uppercase', marginRight: 4 }}>Filter</span>
             {[['all','All'],['strong','Strong 5-6'],['mod','Moderate 3-4'],['weak','Weak 0-2'],['us','US'],['intl','International']].map(function(kl) {
@@ -586,14 +507,11 @@ export default function Home() {
             })}
           </div>
  
-          {/* ── Progress ── */}
           {scanning && (
             <div style={{ height: 2, background: C.border, marginBottom: 16, overflow: 'hidden' }}>
               <div style={{ height: '100%', background: C.gold, width: progress + '%', transition: 'width 0.4s' }}/>
             </div>
           )}
- 
-          {/* ── Status ── */}
           {status && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: status.startsWith('Error') ? C.red : C.txMid, fontFamily: MONO, marginBottom: 12 }}>
               {scanning && <div style={{ width: 11, height: 11, border: '1.5px solid ' + C.border, borderTopColor: C.gold, borderRadius: '50%', flexShrink: 0, animation: 'spin 0.7s linear infinite' }}/>}
@@ -601,42 +519,28 @@ export default function Home() {
             </div>
           )}
  
-          {/* ── Results ── */}
           {filtered.length === 0 && !scanning ? (
             <div style={{ textAlign: 'center', padding: '48px 16px', color: C.txLight, fontFamily: FONTS, fontSize: 18, fontStyle: 'italic', fontWeight: 300 }}>
               {results.length > 0 ? 'No results match this filter.' : 'Select a sector or enter tickers above to begin scanning.'}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {filtered.map(function(stock, i) {
-                return <ResultCard key={stock.ticker} stock={stock} rank={i + 1}/>;
-              })}
+              {filtered.map(function(stock, i) { return <ResultCard key={stock.ticker} stock={stock} rank={i+1}/>; })}
             </div>
           )}
  
-          {/* ── Export ── */}
           {results.length > 0 && (
             <div style={{ display: 'flex', gap: 8, marginTop: 24, paddingTop: 20, borderTop: '0.5px solid ' + C.borderDk, flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{ fontSize: 10, color: C.txLight, fontFamily: MONO, flex: 1, letterSpacing: '0.06em' }}>
-                {filtered.length + ' securities ready to export'}
-              </span>
-              <button onClick={exportCSV}
-                style={{ padding: '8px 18px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 11, fontFamily: SANS, letterSpacing: '0.06em' }}>
-                Export CSV
-              </button>
+              <span style={{ fontSize: 10, color: C.txLight, fontFamily: MONO, flex: 1, letterSpacing: '0.06em' }}>{filtered.length + ' securities ready to export'}</span>
+              <button onClick={exportCSV} style={{ padding: '8px 18px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 11, fontFamily: SANS, letterSpacing: '0.06em' }}>Export CSV</button>
               <button onClick={function() {
-                var out  = filtered.map(function(r, i) { return Object.assign({ rank: i + 1 }, r); });
-                var blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
-                var a    = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = 'signals_' + new Date().toISOString().slice(0, 10) + '.json';
-                a.click();
-              }} style={{ padding: '8px 18px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 11, fontFamily: SANS, letterSpacing: '0.06em' }}>
-                Export JSON
-              </button>
+                var out = filtered.map(function(r,i) { return Object.assign({rank:i+1},r); });
+                var blob = new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+                var a = document.createElement('a'); a.href=URL.createObjectURL(blob);
+                a.download='signals_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
+              }} style={{ padding: '8px 18px', background: 'transparent', color: C.txMid, border: '0.5px solid ' + C.borderDk, fontSize: 11, fontFamily: SANS, letterSpacing: '0.06em' }}>Export JSON</button>
             </div>
           )}
- 
         </div>
       </div>
     </>
