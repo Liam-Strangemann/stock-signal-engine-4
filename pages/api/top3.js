@@ -311,5 +311,4 @@ export default async function handler(req, res) {
   }
 }
  
-var UNIQ_TICKERS = Array.from(new Set(TICKERS)).filter(function(t){ return t && t.length <= 5; });
  
