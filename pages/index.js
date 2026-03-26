@@ -4,15 +4,39 @@ import Head from 'next/head';
 const UNIVERSE = ['AAPL','MSFT','GOOGL','AMZN','META','NVDA','AVGO','ORCL','ADBE','INTU','AMD','INTC','QCOM','TXN','AMAT','MU','CSCO','IBM','ACN','HPQ','NOW','CRM','PANW','FTNT','KLAC','LRCX','SNPS','CDNS','JPM','BAC','WFC','GS','MS','BLK','C','AXP','SCHW','USB','PNC','TFC','COF','DFS','AIG','MET','PRU','AFL','CB','TRV','CME','ICE','SPGI','MCO','MA','V','LLY','JNJ','UNH','ABBV','MRK','PFE','TMO','ABT','AMGN','CVS','MDT','ISRG','BSX','SYK','REGN','BIIB','VRTX','CI','HUM','ELV','XOM','CVX','COP','EOG','SLB','MPC','PSX','VLO','OXY','DVN','HAL','BKR','HES','TPL','HD','MCD','NKE','SBUX','LOW','TGT','COST','WMT','TJX','ROST','BKNG','MAR','HLT','YUM','CMG','DRI','TSCO','ORLY','AZO','KO','PEP','PG','PM','MO','KHC','GIS','HSY','MDLZ','CL','CLX','CHD','SYY','KR','CAG','MKC','HRL','TSN','CAT','HON','MMM','GE','RTX','LMT','NOC','GD','UPS','FDX','UNP','CSX','NSC','DE','EMR','ROK','ITW','ETN','PH','DOV','LIN','APD','ECL','NEM','FCX','PPG','SHW','T','VZ','TMUS','NEE','DUK','SO','AEP','EXC','AMT','PLD','EQIX','CCI','SPG','O','VICI','TSM','ASML','NVO','SAP','TM','AZN','HSBC','SHEL','BHP','RIO','NVS','UL','DEO','BTI','GSK'];
 const UNIQ = [...new Set(UNIVERSE)];
  
+// Improved quick-score: weights PE more heavily, penalises missing PE less,
+// and boosts stocks near fair value rather than near distressed lows.
 function quickScore(s) {
   if (!s.marketCap || s.marketCap < 2_000_000_000) return null;
   let n = 0;
+ 
+  // PE value — strongest signal for undervaluation
   if (s.peRatio && s.peRatio > 0 && s.peRatio <= 150) {
-    if (s.peRatio<=12) n+=40; else if (s.peRatio<=18) n+=32; else if (s.peRatio<=25) n+=22; else if (s.peRatio<=35) n+=12; else if (s.peRatio<=50) n+=5;
+    if      (s.peRatio <= 10) n += 50;
+    else if (s.peRatio <= 15) n += 40;
+    else if (s.peRatio <= 20) n += 30;
+    else if (s.peRatio <= 28) n += 18;
+    else if (s.peRatio <= 40) n += 8;
+    else                      n += 2;
+  } else if (!s.peRatio) {
+    // No PE: don't penalise, but don't boost — neutral
+    n += 5;
   }
-  if (s.pctFromHigh>50) n-=15;
-  else if (s.lowProximity<20) n+=25; else if (s.lowProximity<35) n+=18; else if (s.lowProximity<55) n+=10; else if (s.lowProximity<75) n+=4;
-  if (s.marketCap>500e9) n+=15; else if (s.marketCap>100e9) n+=10; else if (s.marketCap>20e9) n+=5; else if (s.marketCap>5e9) n+=2;
+ 
+  // Price position: mild boost for being below recent highs (potential bounce)
+  // but NOT rewarding stocks that are crashing
+  if (s.pctFromHigh > 60)      n -= 10; // likely distressed — small penalty
+  else if (s.pctFromHigh > 40) n += 0;  // significant pullback — neutral
+  else if (s.pctFromHigh > 20) n += 8;  // healthy pullback — mild boost
+  else if (s.pctFromHigh > 10) n += 12; // minor dip — good entry
+  else                          n += 5;  // near 52w high — priced in
+ 
+  // Size: larger caps have better signal data coverage
+  if      (s.marketCap > 500e9) n += 15;
+  else if (s.marketCap > 100e9) n += 10;
+  else if (s.marketCap >  20e9) n += 5;
+  else if (s.marketCap >   5e9) n += 2;
+ 
   return n > 0 ? n : null;
 }
  
@@ -32,97 +56,128 @@ function ScoreDots({score,max=6}){return <div style={{display:'flex',gap:4}}>{Ar
 function SigPill({sig}){var bg=sig.status==='pass'?C.greenBg:sig.status==='fail'?C.redBg:C.amberBg,color=sig.status==='pass'?C.green:sig.status==='fail'?C.red:C.amber,bd=sig.status==='pass'?C.greenBd:sig.status==='fail'?C.redBd:C.amberBd;return(<div style={{background:bg,border:'0.5px solid '+bd,borderRadius:6,padding:'5px 7px'}}><div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}><div style={{width:5,height:5,borderRadius:'50%',background:color,flexShrink:0}}/><div style={{fontSize:8,color:C.txLight,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.04em',lineHeight:1.2}}>{sig.label}</div></div><div style={{fontSize:10,fontWeight:500,color:color,fontFamily:MONO,lineHeight:1.3,wordBreak:'break-word'}}>{sig.value||'--'}</div></div>);}
 function ScoreDisplay({score,size=22}){var sc=Math.min(score||0,6),c=sc>=5?C.gold:sc>=4?'#A8C080':sc>=3?'#C8A870':C.txLight;return <span style={{fontFamily:MONO,fontSize:size,fontWeight:400,letterSpacing:'0.05em',fontVariantNumeric:'tabular-nums',color:c,lineHeight:1}}>{sc}<span style={{opacity:0.5,margin:'0 1px'}}>/</span>6</span>;}
  
-// ── Polygonal bull SVG with flat shading ──────────────────────────────────────
-// Facing right, charging pose, low-poly style inspired by the reference image.
-// Three tones from the gold palette for a faceted 3D effect.
-function PolyBull({ pct = 0 }) {
-  // Gold palette: light face, mid face, dark face
-  const L = '#D4B87A'; // highlight
-  const M = '#B8A070'; // mid — gold
-  const D = '#8B7050'; // shadow
-  const O = '#6B5030'; // outline / darkest
+// ── Polygonal bull — traced faithfully from reference image ───────────────────
+// The reference shows a low-poly bull facing right in charging pose.
+// Outline colour = deepBg (#3A3832). Faces filled with three gold tones
+// to simulate flat-shaded lighting from upper-right.
+// viewBox 340×200 matches the approximate proportions of the reference.
+function PolyBull() {
+  const bg  = '#3A3832'; // deepBg — replaces black outline
+  const L   = '#CBA96A'; // light face (upper surfaces, catching light)
+  const M   = '#B8A070'; // mid face  (lateral surfaces) — the gold
+  const D   = '#8B7355'; // dark face (lower surfaces, shadow)
+  const S   = '#6B5840'; // deepest shadow (underside, legs)
+  const str = bg;        // stroke colour — matches background so lines pop
+  const sw  = '2';       // stroke width
  
   return (
-    <svg width="72" height="48" viewBox="0 0 120 80" xmlns="http://www.w3.org/2000/svg" className="poly-bull">
-      {/* ── BODY — main torso facets ── */}
-      <polygon points="30,55 55,65 70,50 50,38" fill={M}/>
-      <polygon points="50,38 70,50 85,42 65,28" fill={L}/>
-      <polygon points="30,55 50,38 35,28 18,42" fill={D}/>
-      <polygon points="55,65 75,70 85,55 70,50" fill={D}/>
-      <polygon points="70,50 85,42 95,50 85,55" fill={M}/>
+    <svg viewBox="0 0 340 200" width="170" height="100" xmlns="http://www.w3.org/2000/svg" style={{display:'block'}}>
+      {/* ════ BODY — main torso ════ */}
+      {/* Upper back — light */}
+      <polygon points="80,60 130,30 175,45 145,80" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Upper mid — light */}
+      <polygon points="130,30 175,45 200,25 165,10" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Shoulder hump — lightest */}
+      <polygon points="165,10 200,25 210,15 185,5" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Central body — mid */}
+      <polygon points="80,60 145,80 160,110 105,100" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Lower back — mid */}
+      <polygon points="80,60 105,100 85,120 60,90" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Belly — dark */}
+      <polygon points="105,100 160,110 155,135 110,130" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Right flank upper — mid */}
+      <polygon points="145,80 175,45 200,70 175,95" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Right flank lower — dark */}
+      <polygon points="175,95 200,70 215,95 190,115" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Right flank bottom — dark */}
+      <polygon points="175,95 190,115 170,130 155,115" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Mid body centre — mid */}
+      <polygon points="145,80 160,110 175,95" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
  
-      {/* ── SHOULDER hump ── */}
-      <polygon points="50,38 65,28 75,32 70,50" fill={L}/>
-      <polygon points="65,28 75,32 80,22 70,18" fill={L}/>
+      {/* ════ NECK ════ */}
+      <polygon points="200,25 210,15 230,30 220,45" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      <polygon points="200,25 220,45 210,60 195,45" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
  
-      {/* ── NECK ── */}
-      <polygon points="80,22 90,30 95,22 88,14" fill={M}/>
-      <polygon points="80,22 88,14 82,8 76,16" fill={L}/>
+      {/* ════ HEAD ════ */}
+      {/* Top of head — light */}
+      <polygon points="210,15 230,30 250,20 235,5" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Face front — mid */}
+      <polygon points="230,30 250,20 265,35 248,50" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Lower face — dark */}
+      <polygon points="230,30 248,50 235,60 220,45" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Snout — mid */}
+      <polygon points="265,35 278,28 285,42 270,50" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Snout bottom — dark */}
+      <polygon points="265,35 270,50 255,52 248,50" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
  
-      {/* ── HEAD ── */}
-      <polygon points="88,14 98,18 105,12 96,6" fill={M}/>
-      <polygon points="82,8 88,14 96,6 90,2" fill={L}/>
-      <polygon points="98,18 110,20 108,12 105,12" fill={D}/>
+      {/* ════ HORNS ════ */}
+      <polygon points="235,5 250,20 258,8 248,0" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      <polygon points="250,20 265,35 275,22 258,8" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
  
-      {/* ── SNOUT ── */}
-      <polygon points="105,12 110,20 116,16 112,8" fill={M}/>
-      <polygon points="112,8 116,16 118,12 114,6" fill={D}/>
+      {/* ════ EYE ════ */}
+      <circle cx="256" cy="32" r="3.5" fill={bg}/>
+      <circle cx="257" cy="31" r="1.5" fill={L} opacity="0.6"/>
  
-      {/* ── HORNS ── */}
-      <polygon points="90,2 96,6 100,0 94,0" fill={L}/>
-      <polygon points="96,6 105,12 108,4 100,0" fill={M}/>
+      {/* ════ TAIL ════ */}
+      {/* Tail base — dark */}
+      <polygon points="60,90 80,60 65,50 45,75" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Tail mid — mid */}
+      <polygon points="45,75 65,50 52,38 35,58" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Tail tip segments — light, jagged like reference */}
+      <polygon points="35,58 52,38 42,28 28,44" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      <polygon points="28,44 42,28 32,22 20,34" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      <polygon points="20,34 32,22 25,15 14,25" fill={L} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Tail curl tip */}
+      <polygon points="14,25 25,15 18,10 10,18" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
  
-      {/* ── EYE ── */}
-      <circle cx="100" cy="10" r="2" fill={O}/>
+      {/* ════ FRONT LEGS (right side, closer) ════ */}
+      {/* Front right upper */}
+      <polygon points="175,95 190,115 185,140 170,125" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Front right lower */}
+      <polygon points="185,140 190,115 200,138 195,160" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Front right hoof */}
+      <polygon points="185,140 195,160 188,168 178,155" fill={S} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Front left (far, partially hidden) */}
+      <polygon points="160,110 175,130 168,155 155,138" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      <polygon points="168,155 175,130 182,150 176,168" fill={S} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
  
-      {/* ── TAIL ── */}
-      <polygon points="18,42 30,55 22,60 12,50" fill={D}/>
-      <polygon points="12,50 22,60 16,68 8,58" fill={M}/>
-      <polygon points="8,58 16,68 12,74 6,66" fill={L}/>
- 
-      {/* ── FRONT LEGS ── */}
-      {/* Front-right leg (closer) */}
-      <polygon points="75,70 82,70 86,80 80,80" fill={M} className="leg-fr"/>
-      <polygon points="82,70 88,68 92,78 86,80" fill={D} className="leg-fr"/>
-      {/* Front-left leg (far) */}
-      <polygon points="65,68 72,68 74,78 67,78" fill={D} className="leg-fl"/>
- 
-      {/* ── BACK LEGS ── */}
-      {/* Back-right leg (closer) */}
-      <polygon points="38,65 46,66 48,76 40,76" fill={M} className="leg-br"/>
-      <polygon points="46,66 52,64 54,74 48,76" fill={D} className="leg-br"/>
-      {/* Back-left leg (far) */}
-      <polygon points="28,60 36,62 36,72 28,70" fill={D} className="leg-bl"/>
+      {/* ════ BACK LEGS ════ */}
+      {/* Back right upper */}
+      <polygon points="105,100 120,120 115,148 100,130" fill={M} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Back right lower */}
+      <polygon points="115,148 120,120 132,142 128,165" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Back right hoof */}
+      <polygon points="115,148 128,165 120,172 108,158" fill={S} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      {/* Back left (far) */}
+      <polygon points="85,120 100,138 94,162 80,148" fill={D} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
+      <polygon points="94,162 100,138 110,155 105,174" fill={S} stroke={str} strokeWidth={sw} strokeLinejoin="round"/>
     </svg>
   );
 }
  
 // ── Loading bar with polygonal bull ──────────────────────────────────────────
 function BullLoader({ scanned, total, phase }) {
-  var pct = total > 0 ? Math.min(99, Math.round(scanned / total * 100)) : 2;
-  if (phase === 'enriching') pct = 100;
-  var label = phase === 'enriching' ? 'Enriching top picks with signal data…' : `Scanning ${scanned} of ${total} securities`;
- 
+  var pct = phase==='enriching' ? 100 : (total>0 ? Math.min(98, Math.round(scanned/total*100)) : 2);
+  var label = phase==='enriching' ? 'Enriching top picks with signal data…' : `Scanning ${scanned} of ${total} securities`;
   return (
-    <div style={{ padding: '18px 20px', background: C.cardBg, border: '0.5px solid ' + C.border, borderRadius: 2 }}>
-      {/* Track */}
-      <div style={{ position: 'relative', marginBottom: 10 }}>
-        <div style={{ height: 3, background: C.borderDk, borderRadius: 2, overflow: 'hidden' }}>
-          <div style={{ height: '100%', background: C.gold, width: pct + '%', transition: 'width 0.5s ease', borderRadius: 2 }}/>
+    <div style={{padding:'20px',background:C.cardBg,border:'0.5px solid '+C.border,borderRadius:2}}>
+      <div style={{position:'relative',paddingBottom:20,marginBottom:12}}>
+        {/* Track */}
+        <div style={{height:3,background:C.borderDk,borderRadius:2,overflow:'hidden',marginTop:8}}>
+          <div style={{height:'100%',background:C.gold,width:pct+'%',transition:'width 0.6s ease',borderRadius:2}}/>
         </div>
-        {/* Bull rides along track */}
+        {/* Bull rides along the track */}
         <div style={{
-          position: 'absolute',
-          bottom: 3,
-          left: `clamp(0px, calc(${pct}% - 36px), calc(100% - 72px))`,
-          transition: 'left 0.5s ease',
+          position:'absolute', bottom:0,
+          left:`clamp(0%, calc(${pct}% - 90px), calc(100% - 180px))`,
+          transition:'left 0.6s ease',
         }}>
-          <PolyBull pct={pct}/>
+          <PolyBull/>
         </div>
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 36, paddingTop: 4 }}>
-        <span style={{ fontSize: 11, fontFamily: MONO, color: C.txLight, letterSpacing: '0.05em' }}>{label}</span>
-        <span style={{ fontSize: 11, fontFamily: MONO, color: C.gold, fontWeight: 400 }}>{pct}%</span>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:14}}>
+        <span style={{fontSize:11,fontFamily:MONO,color:C.txLight,letterSpacing:'0.04em'}}>{label}</span>
+        <span style={{fontSize:11,fontFamily:MONO,color:C.gold}}>{pct}%</span>
       </div>
     </div>
   );
@@ -130,7 +185,8 @@ function BullLoader({ scanned, total, phase }) {
  
 function FeatureCard({stock,rank}){
   if(!stock)return null;
-  var sc=Math.min(stock.score||0,6),medals=['I','II','III'],chgPos=stock.change?.startsWith('+'),exchange=getExchange(stock),timeStr=stock.updatedAt?new Date(stock.updatedAt).toLocaleTimeString():'';
+  var sc=Math.min(stock.score||0,6),medals=['I','II','III'],chgPos=stock.change?.startsWith('+');
+  var exchange=getExchange(stock),timeStr=stock.updatedAt?new Date(stock.updatedAt).toLocaleTimeString():'';
   return(<div style={{background:C.deepBg,border:'1px solid '+C.accent,borderTop:'3px solid '+C.gold,borderRadius:2,padding:'24px 22px',flex:1,minWidth:0,display:'flex',flexDirection:'column'}}>
     <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:16}}>
       <div>
@@ -210,67 +266,36 @@ export default function Home() {
  
   async function runTop3Scan() {
     setScanPhase('scanning');
-    setScanProg({scanned:0, total:UNIQ.length});
+    setScanProg({scanned:0,total:UNIQ.length});
  
-    // ONE single POST with all symbols — server fetches all in parallel
-    // and returns in a single response, avoiding sequential batch overhead
-    let allStocks = [];
+    let allStocks=[];
     try {
-      const r = await fetch('/api/scan', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({symbols: UNIQ}),
-      });
-      if (r.ok) {
-        const d = await r.json();
-        allStocks = Array.isArray(d.results) ? d.results : [];
-      }
-    } catch(_) {}
+      const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:UNIQ})});
+      if (r.ok) { const d=await r.json(); allStocks=Array.isArray(d.results)?d.results:[]; }
+    } catch(_){}
  
-    setScanProg({scanned: UNIQ.length, total: UNIQ.length});
+    setScanProg({scanned:UNIQ.length,total:UNIQ.length});
  
-    // Score and select candidates
-    const scored = allStocks
-      .map(s=>{const qs=quickScore(s);return qs!==null?{...s,qs}:null;})
-      .filter(Boolean).sort((a,b)=>b.qs-a.qs);
- 
-    // Safety net: if nothing scored, fall back to top market caps
-    const pool = scored.length >= 3 ? scored
-      : allStocks.filter(s=>s.marketCap>1e9).sort((a,b)=>(b.marketCap||0)-(a.marketCap||0));
- 
-    // Last resort: hardcoded mega-caps
-    const candidates = pool.length >= 3
-      ? pool.slice(0,5).map(s=>s.symbol)
-      : ['AAPL','MSFT','JPM'];
+    const scored=allStocks.map(s=>{const qs=quickScore(s);return qs!==null?{...s,qs}:null;}).filter(Boolean).sort((a,b)=>b.qs-a.qs);
+    const pool=scored.length>=3?scored:allStocks.filter(s=>s.marketCap>1e9).sort((a,b)=>(b.marketCap||0)-(a.marketCap||0));
+    const candidates=pool.length>=3?pool.slice(0,6).map(s=>s.symbol):['AAPL','MSFT','JPM','KO','XOM','JNJ'];
  
     setScanPhase('enriching');
  
     try {
-      const res = await fetch('/api/top3', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({tickers:candidates, totalScanned:allStocks.length}),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.top3 && data.top3.length > 0) {
-          setTop3(data); setScanPhase('ready'); return;
-        }
-      }
-    } catch(_) {}
+      const res=await fetch('/api/top3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers:candidates,totalScanned:allStocks.length})});
+      if (res.ok){const data=await res.json();if(data.top3&&data.top3.length>0){setTop3(data);setScanPhase('ready');return;}}
+    } catch(_){}
     setScanPhase('ready');
   }
  
-  useEffect(function() {
-    if (hasRunRef.current) return;
-    hasRunRef.current = true;
-    fetch('/api/top3')
-      .then(r=>r.json())
-      .then(function(d){
-        if (d.top3&&d.top3.length>0){setTop3(d);setScanPhase('ready');}
-        else runTop3Scan();
-      })
-      .catch(()=>runTop3Scan());
+  useEffect(function(){
+    if(hasRunRef.current)return;
+    hasRunRef.current=true;
+    fetch('/api/top3').then(r=>r.json()).then(function(d){
+      if(d.top3&&d.top3.length>0){setTop3(d);setScanPhase('ready');}
+      else runTop3Scan();
+    }).catch(()=>runTop3Scan());
   },[]);
  
   var scan=useCallback(function(tickers){
@@ -306,14 +331,6 @@ export default function Home() {
         @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes shimmer{0%,100%{opacity:0.35}50%{opacity:0.65}}
-        @keyframes bullWalk{0%,100%{transform:translateY(0px)}50%{transform:translateY(-2px)}}
-        @keyframes legA{0%,100%{transform:rotate(0deg)}40%{transform:rotate(14deg)}80%{transform:rotate(-10deg)}}
-        @keyframes legB{0%,100%{transform:rotate(-8deg)}40%{transform:rotate(6deg)}80%{transform:rotate(12deg)}}
-        .poly-bull{animation:bullWalk 0.55s ease-in-out infinite}
-        .leg-fr{transform-origin:79px 70px;animation:legA 0.55s ease-in-out infinite}
-        .leg-fl{transform-origin:68px 68px;animation:legB 0.55s ease-in-out infinite 0.14s}
-        .leg-br{transform-origin:44px 65px;animation:legB 0.55s ease-in-out infinite 0.07s}
-        .leg-bl{transform-origin:32px 62px;animation:legA 0.55s ease-in-out infinite 0.21s}
         .card-anim{animation:fadeUp 0.5s ease both}
         .card-anim:nth-child(1){animation-delay:0.05s}
         .card-anim:nth-child(2){animation-delay:0.15s}
@@ -322,7 +339,6 @@ export default function Home() {
     </Head>
  
     <div style={{background:C.pageBg,minHeight:'100vh',color:C.tx,fontFamily:SANS}}>
-      {/* Header */}
       <div style={{background:C.deepBg,borderBottom:'1px solid rgba(184,160,112,0.3)',padding:'0 32px'}}>
         <div style={{maxWidth:1200,margin:'0 auto',display:'flex',alignItems:'center',justifyContent:'space-between',height:64}}>
           <div style={{display:'flex',alignItems:'center',gap:16}}>
@@ -345,7 +361,6 @@ export default function Home() {
       </div>
  
       <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 32px 80px'}}>
-        {/* Top 3 */}
         <div style={{marginBottom:40}}>
           <div style={{display:'flex',alignItems:'baseline',gap:16,marginBottom:20}}>
             <h2 style={{fontSize:36,fontFamily:FONTS,fontWeight:600,color:C.tx,letterSpacing:'0.02em'}}>Top Picks Today</h2>
@@ -384,7 +399,6 @@ export default function Home() {
           )}
         </div>
  
-        {/* Custom Scan */}
         <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:32}}>
           <h2 style={{fontSize:36,fontFamily:FONTS,fontWeight:600,color:C.tx,letterSpacing:'0.02em',whiteSpace:'nowrap'}}>Custom Scan</h2>
           <div style={{height:'0.5px',flex:1,background:C.borderDk}}/>
