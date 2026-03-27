@@ -1,61 +1,44 @@
 // pages/api/top3.js
-//
-// Runs /api/analyse on the top candidates from the Yahoo scan, then
-// returns the 3 highest-scoring stocks by actual signal score.
-//
-// Key improvements over previous version:
-// • Analyses up to 10 candidates (was 6) — more chances to find strong stocks
-// • Diversifies candidates across sectors so we don't get 3 stocks from one sector
-// • Filters out any stock that scored 0/6 from the final top 3
-// • Caches result for 1 hour
+// GET  — return cache (instant)
+// POST { tickers, scored, totalScanned }
+//      — picks 10 diversified candidates, calls /api/analyse, returns top 3 by score
  
 let cache = { data: null, timestamp: 0 };
 const CACHE_TTL = 60 * 60 * 1000;
  
-// Sector buckets — ensures candidates span the market
 const SECTOR_BUCKETS = {
-  tech:        ['AAPL','MSFT','GOOGL','NVDA','META','AVGO','ORCL','ADBE','AMD','CSCO','IBM','INTU'],
-  finance:     ['JPM','BAC','GS','MS','V','MA','AXP','BLK','SCHW','WFC','C','SPGI','MCO'],
-  healthcare:  ['LLY','JNJ','UNH','ABBV','MRK','TMO','ABT','AMGN','CVS','ISRG','REGN','VRTX'],
-  energy:      ['XOM','CVX','COP','EOG','MPC','PSX','VLO','SLB','OXY','DVN','TPL'],
-  consumer:    ['HD','MCD','NKE','COST','WMT','LOW','TGT','TJX','BKNG','MO','PM','KO','PEP','PG'],
-  industrial:  ['CAT','HON','GE','RTX','LMT','UPS','UNP','DE','EMR','ETN','DOV'],
-  materials:   ['LIN','APD','ECL','NEM','FCX','PPG','SHW'],
-  intl:        ['TSM','NVO','AZN','ASML','SHEL','BHP','RIO'],
+  tech:       ['AAPL','MSFT','GOOGL','NVDA','META','AVGO','ORCL','ADBE','AMD','CSCO','IBM','INTU'],
+  finance:    ['JPM','BAC','GS','MS','V','MA','AXP','BLK','SCHW','WFC','C','SPGI','MCO'],
+  healthcare: ['LLY','JNJ','UNH','ABBV','MRK','TMO','ABT','AMGN','CVS','ISRG','REGN','VRTX'],
+  energy:     ['XOM','CVX','COP','EOG','MPC','PSX','VLO','SLB','OXY','DVN','TPL'],
+  consumer:   ['HD','MCD','NKE','COST','WMT','LOW','TGT','TJX','BKNG','MO','PM','KO','PEP','PG'],
+  industrial: ['CAT','HON','GE','RTX','LMT','UPS','UNP','DE','EMR','ETN','DOV'],
+  materials:  ['LIN','APD','ECL','NEM','FCX','PPG','SHW'],
+  intl:       ['TSM','NVO','AZN','ASML','SHEL','BHP','RIO'],
 };
  
-// Pick the top-N candidates from each sector bucket based on quick-score
-function diversifyCandidates(scored, maxPerSector = 2, total = 10) {
-  // Map symbol → quick-score
+function diversifyCandidates(scored, maxPerSector, total) {
   const scoreMap = {};
   for (const s of scored) scoreMap[s.symbol] = s.qs;
- 
   const picked = new Set();
   const result = [];
- 
-  // First pass: take up to maxPerSector from each sector bucket
-  for (const [, tickers] of Object.entries(SECTOR_BUCKETS)) {
-    const sectorCandidates = tickers
+  for (const tickers of Object.values(SECTOR_BUCKETS)) {
+    const best = tickers
       .filter(t => scoreMap[t] != null)
-      .sort((a, b) => (scoreMap[b] || 0) - (scoreMap[a] || 0))
+      .sort((a, b) => (scoreMap[b]||0) - (scoreMap[a]||0))
       .slice(0, maxPerSector);
-    for (const t of sectorCandidates) {
+    for (const t of best) {
       if (!picked.has(t)) { picked.add(t); result.push(t); }
     }
   }
- 
-  // Second pass: fill remaining slots with best overall (in case some sectors had no data)
   for (const s of scored) {
     if (result.length >= total) break;
     if (!picked.has(s.symbol)) { picked.add(s.symbol); result.push(s.symbol); }
   }
- 
   return result.slice(0, total);
 }
  
 export default async function handler(req, res) {
- 
-  // GET: serve cache instantly
   if (req.method === 'GET') {
     if (cache.data && Date.now() - cache.timestamp < CACHE_TTL) {
       res.setHeader('X-Cache', 'HIT');
@@ -64,7 +47,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ top3: [], totalScanned: 0, empty: true });
   }
  
-  // POST: analyse diversified candidates, cache top 3 by real score
   if (req.method === 'POST') {
     const { tickers, scored: scoredRaw, totalScanned } = req.body;
     if (!Array.isArray(tickers) || !tickers.length) {
@@ -76,15 +58,12 @@ export default async function handler(req, res) {
       const host  = req.headers['x-forwarded-host'] || req.headers.host;
       const base  = `${proto}://${host}`;
  
-      // Pick diversified candidates — up to 10 across sectors
-      let candidates;
-      if (Array.isArray(scoredRaw) && scoredRaw.length > 0) {
-        candidates = diversifyCandidates(scoredRaw, 2, 10);
-      } else {
-        candidates = tickers.slice(0, 10);
-      }
+      // Pick 10 diversified candidates across sectors
+      const candidates = Array.isArray(scoredRaw) && scoredRaw.length > 0
+        ? diversifyCandidates(scoredRaw, 2, 10)
+        : tickers.slice(0, 10);
  
-      // Run /api/analyse on all candidates (same as custom scan)
+      // Call /api/analyse — identical to custom scan
       const analyseRes = await fetch(`${base}/api/analyse`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -97,16 +76,13 @@ export default async function handler(req, res) {
       }
  
       const analyseData = await analyseRes.json();
- 
-      // Sort by score descending — best real signals win
       const all = Object.values(analyseData.results || {})
         .filter(r => r && !r.error && r.score != null)
-        .sort((a, b) => (b.score || 0) - (a.score || 0));
+        .sort((a, b) => (b.score||0) - (a.score||0));
  
-      // Take top 3, but prefer stocks with score >= 2
-      // (avoids showing 0/6 stocks just because everything else failed)
-      let top3 = all.filter(r => (r.score || 0) >= 2).slice(0, 3);
-      if (top3.length < 3) top3 = all.slice(0, 3); // fallback to any results
+      // Prefer stocks that scored ≥ 2; fall back to any if needed
+      let top3 = all.filter(r => (r.score||0) >= 2).slice(0, 3);
+      if (top3.length < 3) top3 = all.slice(0, 3);
  
       const mapped = top3.map(r => ({
         ticker:    r.ticker,
@@ -122,12 +98,7 @@ export default async function handler(req, res) {
         updatedAt: r.updatedAt,
       }));
  
-      const data = {
-        top3:         mapped,
-        totalScanned: totalScanned || 0,
-        generatedAt:  new Date().toISOString(),
-      };
- 
+      const data = { top3: mapped, totalScanned: totalScanned || 0, generatedAt: new Date().toISOString() };
       cache = { data, timestamp: Date.now() };
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
       return res.status(200).json(data);
