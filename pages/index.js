@@ -132,50 +132,19 @@ export default function Home() {
   async function runTop3Scan() {
     setScanPhase('scanning');
     setScanProg({scanned:0,total:UNIQ.length});
- 
-    // Step 1: Quick Yahoo scan — one POST, all symbols
     let allStocks=[];
     try {
       const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:UNIQ})});
       if(r.ok){const d=await r.json();allStocks=Array.isArray(d.results)?d.results:[];}
     } catch(_){}
- 
     setScanProg({scanned:UNIQ.length,total:UNIQ.length});
- 
-    // Step 2: Score every stock
-    const scoredArray = allStocks
-      .map(s=>{const qs=quickScore(s);return qs!==null?{symbol:s.symbol,qs}:null;})
-      .filter(Boolean)
-      .sort((a,b)=>b.qs-a.qs);
- 
-    // Fallback: if scorer filters everything, use by market cap
-    const fallbackTickers = allStocks
-      .filter(s=>s.marketCap>1e9)
-      .sort((a,b)=>(b.marketCap||0)-(a.marketCap||0))
-      .slice(0,10)
-      .map(s=>s.symbol);
- 
+    const scoredArray=allStocks.map(s=>{const qs=quickScore(s);return qs!==null?{symbol:s.symbol,qs}:null;}).filter(Boolean).sort((a,b)=>b.qs-a.qs);
+    const fallback=allStocks.filter(s=>s.marketCap>1e9).sort((a,b)=>(b.marketCap||0)-(a.marketCap||0)).slice(0,10).map(s=>s.symbol);
     setScanPhase('enriching');
- 
-    // Step 3: POST scored array + fallback tickers to /api/top3
-    // top3.js picks 10 diversified candidates across sectors, runs analyse on all,
-    // returns the 3 with the highest actual signal scores
     try {
-      const res=await fetch('/api/top3',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          tickers:  scoredArray.length>=3 ? scoredArray.slice(0,20).map(s=>s.symbol) : fallbackTickers,
-          scored:   scoredArray.slice(0,30), // pass scored data for sector diversification
-          totalScanned: allStocks.length,
-        }),
-      });
-      if(res.ok){
-        const data=await res.json();
-        if(data.top3&&data.top3.length>0){setTop3(data);setScanPhase('ready');return;}
-      }
+      const res=await fetch('/api/top3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers:scoredArray.length>=3?scoredArray.slice(0,20).map(s=>s.symbol):fallback,scored:scoredArray.slice(0,30),totalScanned:allStocks.length})});
+      if(res.ok){const data=await res.json();if(data.top3&&data.top3.length>0){setTop3(data);setScanPhase('ready');return;}}
     } catch(_){}
- 
     setScanPhase('ready');
   }
  
@@ -213,21 +182,8 @@ export default function Home() {
       <meta name="description" content="Institutional-grade equity value scanner"/>
       <meta name="viewport" content="width=device-width, initial-scale=1"/>
       <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet"/>
-      <style>{`
-        *{box-sizing:border-box;margin:0;padding:0}body{background:${C.pageBg}}
-        ::selection{background:${C.gold};color:#2C2C2A}
-        input::placeholder{color:${C.txLight}}input:focus{outline:none}
-        button{cursor:pointer}button:disabled{opacity:0.4;cursor:not-allowed}
-        @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes spin{to{transform:rotate(360deg)}}
-        @keyframes shimmer{0%,100%{opacity:0.35}50%{opacity:0.65}}
-        .card-anim{animation:fadeUp 0.5s ease both}
-        .card-anim:nth-child(1){animation-delay:0.05s}
-        .card-anim:nth-child(2){animation-delay:0.15s}
-        .card-anim:nth-child(3){animation-delay:0.25s}
-      `}</style>
+      <style>{`*{box-sizing:border-box;margin:0;padding:0}body{background:${C.pageBg}}::selection{background:${C.gold};color:#2C2C2A}input::placeholder{color:${C.txLight}}input:focus{outline:none}button{cursor:pointer}button:disabled{opacity:0.4;cursor:not-allowed}@keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes shimmer{0%,100%{opacity:0.35}50%{opacity:0.65}}.card-anim{animation:fadeUp 0.5s ease both}.card-anim:nth-child(1){animation-delay:0.05s}.card-anim:nth-child(2){animation-delay:0.15s}.card-anim:nth-child(3){animation-delay:0.25s}`}</style>
     </Head>
- 
     <div style={{background:C.pageBg,minHeight:'100vh',color:C.tx,fontFamily:SANS}}>
       <div style={{background:C.deepBg,borderBottom:'1px solid rgba(184,160,112,0.3)',padding:'0 32px'}}>
         <div style={{maxWidth:1200,margin:'0 auto',display:'flex',alignItems:'center',justifyContent:'space-between',height:64}}>
@@ -249,43 +205,20 @@ export default function Home() {
           </div>
         </div>
       </div>
- 
       <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 32px 80px'}}>
         <div style={{marginBottom:40}}>
           <div style={{display:'flex',alignItems:'baseline',gap:16,marginBottom:20}}>
             <h2 style={{fontSize:36,fontFamily:FONTS,fontWeight:600,color:C.tx,letterSpacing:'0.02em'}}>Top Picks Today</h2>
             <div style={{height:'0.5px',flex:1,background:C.borderDk}}/>
-            <div style={{fontSize:10,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',textTransform:'uppercase',whiteSpace:'nowrap'}}>
-              {scanPhase==='ready'&&scannedTotal>0?scannedTotal+' securities screened':''}
-            </div>
+            <div style={{fontSize:10,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',textTransform:'uppercase',whiteSpace:'nowrap'}}>{scanPhase==='ready'&&scannedTotal>0?scannedTotal+' securities screened':''}</div>
           </div>
- 
-          {scanPhase!=='ready'&&(
-            <div>
-              <div style={{display:'flex',gap:16,marginBottom:4}}>
-                {[0,1,2].map(i=>(<div key={i} style={{flex:1,background:C.cardBg,border:'0.5px solid '+C.border,borderTop:'3px solid '+C.border,borderRadius:2,padding:'24px 22px',animation:'shimmer 1.8s ease-in-out infinite',animationDelay:(i*0.25)+'s'}}>
-                  <div style={{fontSize:10,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',marginBottom:10}}>Rank {['I','II','III'][i]}</div>
-                  <div style={{width:72,height:26,background:C.borderDk,borderRadius:2,marginBottom:10}}/>
-                  <div style={{width:130,height:11,background:C.border,borderRadius:2,marginBottom:6}}/>
-                  <div style={{width:90,height:10,background:C.border,borderRadius:2}}/>
-                </div>))}
-              </div>
-              <ScanStatus phase={scanPhase} scanned={scanProg.scanned} total={scanProg.total}/>
-            </div>
-          )}
- 
-          {scanPhase==='ready'&&top3Stocks.length>0&&(
-            <div style={{display:'flex',gap:16,alignItems:'stretch'}}>
-              {top3Stocks.map((stock,i)=>(<div key={stock.ticker} className="card-anim" style={{flex:1,minWidth:0,display:'flex'}}><FeatureCard stock={stock} rank={i+1}/></div>))}
-            </div>
-          )}
+          {scanPhase!=='ready'&&(<div><div style={{display:'flex',gap:16,marginBottom:4}}>{[0,1,2].map(i=>(<div key={i} style={{flex:1,background:C.cardBg,border:'0.5px solid '+C.border,borderTop:'3px solid '+C.border,borderRadius:2,padding:'24px 22px',animation:'shimmer 1.8s ease-in-out infinite',animationDelay:(i*0.25)+'s'}}><div style={{fontSize:10,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',marginBottom:10}}>Rank {['I','II','III'][i]}</div><div style={{width:72,height:26,background:C.borderDk,borderRadius:2,marginBottom:10}}/><div style={{width:130,height:11,background:C.border,borderRadius:2,marginBottom:6}}/><div style={{width:90,height:10,background:C.border,borderRadius:2}}/></div>))}</div><ScanStatus phase={scanPhase} scanned={scanProg.scanned} total={scanProg.total}/></div>)}
+          {scanPhase==='ready'&&top3Stocks.length>0&&(<div style={{display:'flex',gap:16,alignItems:'stretch'}}>{top3Stocks.map((stock,i)=>(<div key={stock.ticker} className="card-anim" style={{flex:1,minWidth:0,display:'flex'}}><FeatureCard stock={stock} rank={i+1}/></div>))}</div>)}
         </div>
- 
         <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:32}}>
           <h2 style={{fontSize:36,fontFamily:FONTS,fontWeight:600,color:C.tx,letterSpacing:'0.02em',whiteSpace:'nowrap'}}>Custom Scan</h2>
           <div style={{height:'0.5px',flex:1,background:C.borderDk}}/>
         </div>
- 
         <div style={{background:C.cardBg,border:'0.5px solid '+C.borderDk,padding:'20px',marginBottom:20}}>
           <div style={{display:'flex',gap:10,marginBottom:14}}>
             <input type="text" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')runScan();}} placeholder="Enter ticker symbols: AAPL, MSFT, NVDA, TSM..." style={{flex:1,background:C.pageBg,border:'0.5px solid '+C.borderDk,padding:'10px 14px',fontSize:13,fontFamily:MONO,color:C.tx,borderRadius:0}}/>
@@ -298,26 +231,14 @@ export default function Home() {
             {Object.keys(PRESETS).map(name=>{var a=activePreset===name;return <button key={name} onClick={()=>{setInput(PRESETS[name]);setActivePreset(name);}} style={{padding:'4px 12px',fontSize:10,fontFamily:SANS,letterSpacing:'0.06em',background:a?C.darkBg:'transparent',color:a?'#F1EFE8':C.txMid,border:'0.5px solid '+(a?C.darkBg:C.borderDk),borderRadius:0,whiteSpace:'nowrap'}}>{name}</button>;})}
           </div>
         </div>
- 
         <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center',marginBottom:16}}>
           <span style={{fontSize:9,color:C.txLight,fontFamily:SANS,letterSpacing:'0.12em',textTransform:'uppercase',marginRight:4}}>Filter</span>
           {[['all','All'],['strong','Strong 5-6'],['mod','Moderate 3-4'],['weak','Weak 0-2'],['us','US'],['intl','International']].map(kl=>{var a=filter===kl[0];return <button key={kl[0]} onClick={()=>setFilter(kl[0])} style={{padding:'4px 12px',fontSize:10,fontFamily:SANS,letterSpacing:'0.06em',background:a?C.accentDk:'transparent',color:a?'#F1EFE8':C.txMid,border:'0.5px solid '+(a?C.accentDk:C.borderDk),borderRadius:0}}>{kl[1]}</button>;})}
         </div>
- 
         {scanning&&<div style={{height:2,background:C.border,marginBottom:16,overflow:'hidden'}}><div style={{height:'100%',background:C.gold,width:progress+'%',transition:'width 0.4s'}}/></div>}
         {status&&<div style={{display:'flex',alignItems:'center',gap:8,fontSize:11,color:status.startsWith('Error')?C.red:C.txMid,fontFamily:MONO,marginBottom:12}}>{scanning&&<div style={{width:11,height:11,border:'1.5px solid '+C.border,borderTopColor:C.gold,borderRadius:'50%',flexShrink:0,animation:'spin 0.7s linear infinite'}}/>}{status}</div>}
- 
-        {filtered.length===0&&!scanning?(<div style={{textAlign:'center',padding:'48px 16px',color:C.txLight,fontFamily:FONTS,fontSize:18,fontStyle:'italic',fontWeight:300}}>{results.length>0?'No results match this filter.':'Select a sector or enter tickers above to begin scanning.'}</div>):(
-          <div style={{display:'flex',flexDirection:'column',gap:8}}>{filtered.map((s,i)=><ResultCard key={s.ticker} stock={s} rank={i+1}/>)}</div>
-        )}
- 
-        {results.length>0&&(
-          <div style={{display:'flex',gap:8,marginTop:24,paddingTop:20,borderTop:'0.5px solid '+C.borderDk,flexWrap:'wrap',alignItems:'center'}}>
-            <span style={{fontSize:10,color:C.txLight,fontFamily:MONO,flex:1,letterSpacing:'0.06em'}}>{filtered.length+' securities ready to export'}</span>
-            <button onClick={exportCSV} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:'0.5px solid '+C.borderDk,fontSize:11,fontFamily:SANS,letterSpacing:'0.06em'}}>Export CSV</button>
-            <button onClick={()=>{var out=filtered.map((r,i)=>Object.assign({rank:i+1},r));var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='signals_'+new Date().toISOString().slice(0,10)+'.json';a.click();}} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:'0.5px solid '+C.borderDk,fontSize:11,fontFamily:SANS,letterSpacing:'0.06em'}}>Export JSON</button>
-          </div>
-        )}
+        {filtered.length===0&&!scanning?(<div style={{textAlign:'center',padding:'48px 16px',color:C.txLight,fontFamily:FONTS,fontSize:18,fontStyle:'italic',fontWeight:300}}>{results.length>0?'No results match this filter.':'Select a sector or enter tickers above to begin scanning.'}</div>):(<div style={{display:'flex',flexDirection:'column',gap:8}}>{filtered.map((s,i)=><ResultCard key={s.ticker} stock={s} rank={i+1}/>)}</div>)}
+        {results.length>0&&(<div style={{display:'flex',gap:8,marginTop:24,paddingTop:20,borderTop:'0.5px solid '+C.borderDk,flexWrap:'wrap',alignItems:'center'}}><span style={{fontSize:10,color:C.txLight,fontFamily:MONO,flex:1,letterSpacing:'0.06em'}}>{filtered.length+' securities ready to export'}</span><button onClick={exportCSV} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:'0.5px solid '+C.borderDk,fontSize:11,fontFamily:SANS,letterSpacing:'0.06em'}}>Export CSV</button><button onClick={()=>{var out=filtered.map((r,i)=>Object.assign({rank:i+1},r));var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='signals_'+new Date().toISOString().slice(0,10)+'.json';a.click();}} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:'0.5px solid '+C.borderDk,fontSize:11,fontFamily:SANS,letterSpacing:'0.06em'}}>Export JSON</button></div>)}
       </div>
     </div>
   </>);
