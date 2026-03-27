@@ -355,7 +355,7 @@ async function fetchStockData(ticker) {
 }
  
 // ── Evaluate ──────────────────────────────────────────────────────────────────
-function evaluate(ticker, d) {
+async function evaluate(ticker, d) {
   const q   = d.quote   || {};
   const p   = d.profile || {};
   const m   = d.metrics?.metric || {};
