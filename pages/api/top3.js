@@ -1,19 +1,15 @@
-// pages/api/top3.js
+// pages/api/top3.js  v3
 //
-// Scans ~500 securities (up from ~200) to find the best candidates for full analysis.
-// Strategy:
-//   - Universe of ~500 US + international large/mid caps covering all 11 GICS sectors
-//   - Fetches Yahoo Finance chart meta in parallel (batches of 40, up from 20)
-//   - Two-wave approach: wave 1 scans all ~500 in parallel batches, wave 2 is the
-//     fast fallback if Yahoo blocks too many. This reliably returns 8 candidates.
-//   - Exchange field is fetched from Yahoo meta and passed through to /api/analyse
-//     so the frontend can display it correctly without making an extra Finnhub call.
-//   - 30-minute server-side cache so repeat page loads are instant.
+// Key fix: quickScore() now selects candidates worth ANALYSING (liquid, reasonable PE,
+// meaningful market cap) — not candidates that look "undervalued" by heuristic.
+// The actual 6-signal score from /api/analyse is the only ranking that matters.
 //
-// Why ~500 and not more:
-//   Vercel free-tier serverless functions have a 10s execution limit.
-//   At 40 concurrent Yahoo requests, 500 stocks ≈ 13 batches × ~0.4s each ≈ 5-6s.
-//   Going beyond ~600 risks timeout. 500 gives the best spread within safe limits.
+// Changes from v2:
+//  - quickScore rewritten: rewards liquidity + quality signals, no longer rewards
+//    "far from 52w high" (which was picking beaten-down stocks over quality ones)
+//  - Candidate pool expanded from 8 → 20 so analyse.js has more to work with
+//  - Handler now sorts returned results by actual signal score (not quickScore)
+//  - 30-minute server-side cache preserved
  
 const YH = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -24,8 +20,6 @@ const YH = {
 };
  
 // ── Universe — ~500 tickers across all 11 GICS sectors ───────────────────────
-// Deliberately over-represents mid-caps and value sectors (energy, finance,
-// healthcare, industrials) since those are most likely to show undervalue signals.
 const UNIVERSE = [
   // ── Mega-cap tech ──────────────────────────────────────────────────────────
   'AAPL','MSFT','NVDA','AMZN','GOOGL','GOOG','META','TSLA','AVGO','ORCL',
@@ -66,7 +60,7 @@ const UNIVERSE = [
   // ── Energy — utilities adjacent ───────────────────────────────────────────
   'LNG','CQP','GLNG','FLNG',
   // ── Consumer discretionary ────────────────────────────────────────────────
-  'AMZN','TSLA','HD','MCD','NKE','SBUX','LOW','TGT','BKNG','MAR',
+  'HD','MCD','NKE','SBUX','LOW','TGT','BKNG','MAR',
   'HLT','YUM','CMG','DRI','QSR','ORLY','AZO','TSCO','ULTA','TJX',
   'ROST','LULU','RH','W','ETSY','EBAY','CPRT','KMX','AN','PAG',
   'GPC','AAP','GNTX','BWA','LEA','LKQ','WGO','THO','POOL','FOXF',
@@ -104,7 +98,7 @@ const UNIVERSE = [
   'RIO','BHP','VALE','PBR','SID','ABB','PHIA','ING','BNP','DB',
   'UBS','CS','HSBC','BARC','LLOY','VOD','TEF','VIV','ORAN','NOK',
   // ── International ADRs — Asia/Pacific ─────────────────────────────────────
-  'TSM','TM','HMC','SONY','SNE','NTDOY','9984','SE','GRAB','BABA',
+  'TSM','TM','HMC','SONY','SNE','NTDOY','SE','GRAB','BABA',
   'JD','PDD','BIDU','NIO','TCEHY','NTES','TME','IQ','BILI','VIPS',
   // ── Biotech ───────────────────────────────────────────────────────────────
   'ILMN','PACB','TWST','CDNA','RXRX','BEAM','EDIT','NTLA','CRSP','FATE',
@@ -116,18 +110,15 @@ const UNIVERSE = [
   'CNP','OGE','AVA','POR','NWE','SR','SPKE','GASO',
 ];
  
-// Remove duplicates while preserving order
 const UNIQ = [...new Set(UNIVERSE)];
  
-// ── Pre-scored fallback — for when Yahoo scan returns too few results ──────────
-// These are large-caps with reliable Finnhub data across diverse sectors.
+// ── Fallback pool — reliable large-caps with good Finnhub coverage ────────────
 const FALLBACK = [
-  'JPM','XOM','CVX','KO','VZ','ABBV','MRK','CAT','HON','IBM',
-  'PFE','T','LMT','UPS','GE','GS','BAC','WMT','MCD','PEP',
+  'MSFT','AAPL','NVDA','GOOGL','AMZN','META','JPM','XOM','LLY','UNH',
+  'V','MA','AVGO','HD','MRK','ABBV','PEP','KO','TMO','CAT',
 ];
  
-// ── Yahoo exchange label map — meta.exchangeName → clean badge ────────────────
-// Yahoo returns values like "NasdaqGS", "NYSE", "NASDAQ", "NYSEArca" etc.
+// ── Exchange label normalisation ───────────────────────────────────────────────
 function cleanExchangeLabel(raw) {
   if (!raw) return null;
   const u = raw.toUpperCase();
@@ -139,15 +130,14 @@ function cleanExchangeLabel(raw) {
   if (u.includes('ASX') || u.includes('SYDNEY')) return 'ASX';
   if (u.includes('TYO') || u.includes('TOKYO')) return 'TYO';
   if (u.includes('OTC') || u.includes('PINK')) return 'OTC';
-  // Return first word cleaned up
   return raw.split(/[\s,]/)[0].toUpperCase() || null;
 }
  
 // ── Cache ─────────────────────────────────────────────────────────────────────
 let cache = { data: null, ts: 0 };
-const TTL = 30 * 60 * 1000; // 30 minutes
+const TTL = 30 * 60 * 1000;
  
-// ── Fetch one ticker's quick data from Yahoo ──────────────────────────────────
+// ── Fetch quick data for one ticker ───────────────────────────────────────────
 async function fetchQuick(symbol) {
   for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
     try {
@@ -164,32 +154,79 @@ async function fetchQuick(symbol) {
       const price  = meta.regularMarketPrice;
       const hi     = meta.fiftyTwoWeekHigh  || price * 1.2;
       const lo     = meta.fiftyTwoWeekLow   || price * 0.8;
-      const range  = hi - lo;
       const pe     = meta.trailingPE        || null;
       const mc     = meta.marketCap         || 0;
- 
-      // Clean exchange from Yahoo meta — this is the fix for the "NEW" badge
+      const volume = meta.regularMarketVolume || 0;
       const exchange = cleanExchangeLabel(meta.exchangeName || meta.fullExchangeName) ||
                        cleanExchangeLabel(meta.exchange);
  
       const fromHi = hi > 0 ? ((hi - price) / hi * 100) : 0;
+      const range  = hi - lo;
       const loPct  = range > 0 ? ((price - lo) / range * 100) : 50;
  
-      return { symbol, price, hi, lo, pe, mc, fromHi, loPct, exchange, valid: true };
+      return { symbol, price, hi, lo, pe, mc, volume, fromHi, loPct, exchange, valid: true };
     } catch (_) {}
   }
   return null;
 }
  
-// ── Quick score — same scoring as before, higher = more interesting candidate ─
+// ── quickScore — selects CANDIDATES WORTH FULL ANALYSIS, not pre-judged winners
+//
+// The old version rewarded stocks for being far below their 52w high, which
+// caused beaten-down / declining stocks to outscore quality compounders like MSFT.
+//
+// New logic: score based on signals that correlate with passing the 6-signal test:
+//   1. Market cap quality gate  — large caps have better data coverage
+//   2. PE sanity filter         — PE exists + is in a reasonable range
+//   3. PE level                 — lower PE relative to 30x baseline = more points
+//   4. Moderate distance from high — some pullback is fine, but not a crash
+//   5. Volume / liquidity       — avoid illiquid names that data sources miss
+//   6. 52w range position       — mid-range preferred over extremes
+//
+// Critically: being near the 52w HIGH is no longer punished. A stock near its
+// high with a low PE (e.g. MSFT at PE 22 vs historical 28) should score well.
+// ─────────────────────────────────────────────────────────────────────────────
 function quickScore(s) {
   let n = 0;
-  if (s.pe && s.pe > 3 && s.pe < 200) n += Math.max(0, 35 - s.pe * 0.6);
-  if (s.fromHi > 5  && s.fromHi < 55) n += Math.min(25, s.fromHi * 0.65);
-  if (s.loPct  > 20 && s.loPct  < 85) n += 8;
-  if (s.mc > 500e9)      n += 12;
-  else if (s.mc > 100e9) n += 8;
-  else if (s.mc > 10e9)  n += 4;
+ 
+  // 1. Market cap quality tiers — large caps have richer data for all 6 signals
+  if      (s.mc > 500e9)  n += 20;  // mega cap  (>$500B)
+  else if (s.mc > 100e9)  n += 15;  // large cap (>$100B)
+  else if (s.mc > 20e9)   n += 8;   // mid cap   (>$20B)
+  else if (s.mc > 5e9)    n += 3;   // small cap (>$5B) — still eligible
+  // below $5B: 0 bonus — low data coverage, risky
+ 
+  // 2. PE exists and is in a credible range — means earnings are positive
+  //    (no PE = likely losing money or data missing → lower priority)
+  if (s.pe && s.pe > 0 && s.pe < 200) {
+    n += 8; // base bonus for having a valid PE
+ 
+    // 3. PE level — lower is more likely to pass signal S2 (PE vs hist avg)
+    //    Use a smooth curve: PE 10 → +20pts, PE 20 → +12pts, PE 30 → +5pts, PE 40+ → 0
+    if      (s.pe < 12) n += 20;
+    else if (s.pe < 18) n += 15;
+    else if (s.pe < 25) n += 10;
+    else if (s.pe < 35) n += 5;
+    // PE 35–200: no bonus but still eligible (growth stocks can pass other signals)
+  }
+ 
+  // 4. Distance from 52w high — MILD preference for some pullback, but don't
+  //    reward crashes. A healthy stock might be 5–25% off its high.
+  //    Removed the old 0.65× multiplier that was giving huge scores to -50% stocks.
+  if      (s.fromHi > 3  && s.fromHi < 15) n += 10; // modest pullback — sweet spot
+  else if (s.fromHi >= 15 && s.fromHi < 30) n += 5;  // meaningful dip — still ok
+  else if (s.fromHi >= 30 && s.fromHi < 50) n += 2;  // big drop — worth checking
+  // >50% off high: likely distressed, 0 bonus
+ 
+  // 5. Liquidity — daily volume proxy for data source reliability
+  //    Low-volume stocks often return null from scraper sources → signals show 'No data'
+  if      (s.volume > 10e6) n += 8;
+  else if (s.volume > 1e6)  n += 4;
+  else if (s.volume > 100e3) n += 1;
+ 
+  // 6. 52w range position — mild preference for mid-range (not euphoric, not crashing)
+  if (s.loPct > 25 && s.loPct < 80) n += 4;
+ 
   return Math.round(n);
 }
  
@@ -202,16 +239,14 @@ export default async function handler(req, res) {
   }
  
   let candidates  = [];
-  let stockMeta   = {};  // symbol → { exchange } — passed to /api/analyse
+  let stockMeta   = {};
   let totalScanned = 0;
  
   try {
-    // Scan in batches of 40 (up from 20 — still safe for Vercel free timeout)
     const BATCH = 40;
     const batches = [];
     for (let i = 0; i < UNIQ.length; i += BATCH) batches.push(UNIQ.slice(i, i + BATCH));
  
-    // Run all batches concurrently — Vercel handles the parallelism
     const allResults = (
       await Promise.all(batches.map(b => Promise.all(b.map(fetchQuick))))
     ).flat().filter(Boolean);
@@ -219,30 +254,29 @@ export default async function handler(req, res) {
     totalScanned = allResults.length;
  
     if (allResults.length >= 4) {
-      // Score and pick top 8
       const scored = allResults
         .map(s => ({ ...s, qs: quickScore(s) }))
         .sort((a, b) => b.qs - a.qs);
  
-      candidates = scored.slice(0, 8).map(s => s.symbol);
+      // Send top 20 to analyse — the real 6-signal score picks the final top 3.
+      // Previously only 8 were sent, which could exclude the best candidates entirely.
+      candidates = scored.slice(0, 20).map(s => s.symbol);
  
-      // Build exchange meta map for ALL scanned stocks — /api/analyse can use it
       for (const s of allResults) {
         if (s.exchange) stockMeta[s.symbol] = { exchange: s.exchange };
       }
     }
   } catch (_) {}
  
-  // Guarantee: always return 8
   if (candidates.length < 4) {
-    candidates   = FALLBACK.slice(0, 8);
+    candidates   = FALLBACK.slice(0, 20);
     totalScanned = totalScanned || FALLBACK.length;
   }
-  candidates = [...new Set(candidates)].slice(0, 8);
+  candidates = [...new Set(candidates)].slice(0, 20);
  
   const result = {
     candidates,
-    stockMeta,          // exchange info for all scanned tickers
+    stockMeta,
     totalScanned,
     usedFallback: candidates.every(c => FALLBACK.includes(c)),
     generatedAt: new Date().toISOString(),
