@@ -36,18 +36,17 @@ const C = {
   red:      '#7A3A30',
   redBg:    '#F0DDD9',
   redBd:    '#C8A09A',
-  // Neutral: exact midpoint between original (#F5EDD0 bg, #B8903A text)
-  // and previous darkened (#EDE4C0 bg, #A07828 text)
-  // bg:   avg of F5EDD0 and EDE4C0  → #F1E8C8
-  // text: avg of B8903A and A07828  → #AC8431
-  // border: avg of D4B870 and C4AA58 → #CCB164
+  // Neutral — exact midpoint between original and darkened values:
+  // bg:     midpoint(#F5EDD0, #EDE4C0) = #F1E8C8
+  // text:   midpoint(#B8903A, #A07828) = #AC8431
+  // border: midpoint(#D4B870, #C4AA58) = #CCB164
   amber:    '#AC8431',
   amberBg:  '#F1E8C8',
   amberBd:  '#CCB164',
-  // Dark-card neutral — same midpoint logic
-  // dkAmber text:  avg of #7A6830 and #7A6020 → #7A6428
-  // dkAmberBg:     avg of #EDE8D0 and #E8DEC0 → #EDE3C8   (slightly richer)
-  // dkAmberBd:     avg of #C8B870 and #C0A850 → #C4B060
+  // Dark card neutral — same midpoint logic
+  // text:   midpoint(#7A6830, #7A6020) = #7A6428
+  // bg:     midpoint(#EDE8D0, #E8DEC0) = #EBE3C8
+  // border: midpoint(#C8B870, #C0A850) = #C4B060
   dkGreen:  '#4A6741',
   dkGreenBg:'#D8E8D0',
   dkGreenBd:'#98B890',
@@ -55,7 +54,7 @@ const C = {
   dkRedBg:  '#EDD8D8',
   dkRedBd:  '#C09898',
   dkAmber:  '#7A6428',
-  dkAmberBg:'#EDE3C8',
+  dkAmberBg:'#EBE3C8',
   dkAmberBd:'#C4B060',
 };
  
@@ -70,7 +69,6 @@ function getRating(score) {
   return                  { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
-// ── Score dots ────────────────────────────────────────────────────────────────
 function ScoreDots({ score, max = 6, dark = false }) {
   const filled = dark
     ? score >= 5 ? C.gold : score >= 4 ? '#A8C080' : score >= 3 ? '#C8A870' : 'transparent'
@@ -90,7 +88,6 @@ function ScoreDots({ score, max = 6, dark = false }) {
   );
 }
  
-// ── Signal pill ───────────────────────────────────────────────────────────────
 function SigPill({ sig, label, dark = false }) {
   const isPas  = sig.status === 'pass';
   const isFail = sig.status === 'fail';
@@ -106,9 +103,7 @@ function SigPill({ sig, label, dark = false }) {
     <div style={{ background:bg, border:`0.5px solid ${bd}`, borderRadius:5, padding:'5px 7px' }}>
       <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:3 }}>
         <div style={{ width:4, height:4, borderRadius:'50%', background:color, flexShrink:0 }}/>
-        <div style={{ fontSize:7.5, color:lblColor, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em', lineHeight:1 }}>
-          {label}
-        </div>
+        <div style={{ fontSize:7.5, color:lblColor, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em', lineHeight:1 }}>{label}</div>
       </div>
       <div style={{ fontSize:10, fontWeight:500, color, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>
         {sig.value || '--'}
@@ -117,7 +112,7 @@ function SigPill({ sig, label, dark = false }) {
   );
 }
  
-// ── Skeleton ──────────────────────────────────────────────────────────────────
+// Skeleton matches FeatureCard structure exactly so heights are consistent
 function SkeletonCard() {
   const b = (w, h, extra = {}) => (
     <div style={{ width:w, height:h, borderRadius:2, background:'rgba(255,255,255,0.06)', animation:'shimmer 1.8s ease-in-out infinite', ...extra }}/>
@@ -125,21 +120,20 @@ function SkeletonCard() {
   return (
     <div style={{ background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:`3px solid rgba(184,160,112,0.35)`, borderRadius:2, padding:'24px 22px', display:'flex', flexDirection:'column', height:'100%' }}>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14 }}>
-        <div>{b(80,26,{marginBottom:8})}{b(160,11)}</div>
-        {b(48,26)}
+        <div style={{ flex:1 }}>{b(80,9,{marginBottom:8})}{b(140,26,{marginBottom:6})}{b(160,11)}</div>
+        <div style={{ textAlign:'right' }}>{b(48,26,{marginBottom:8})}{b(60,9)}</div>
       </div>
-      {b(120,11,{marginBottom:16})}
+      {b(130,18,{marginBottom:14})}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
-        {[0,1,2,3,4,5].map(i => (
-          <div key={i} style={{ height:52, borderRadius:4, background:'rgba(255,255,255,0.04)', animation:'shimmer 1.8s ease-in-out infinite', animationDelay:`${i * 0.08}s` }}/>
+        {[0,1,2,3,4,5].map(i=>(
+          <div key={i} style={{ height:52, borderRadius:4, background:'rgba(255,255,255,0.04)', animation:'shimmer 1.8s ease-in-out infinite', animationDelay:`${i*0.08}s` }}/>
         ))}
       </div>
-      <div style={{ flex:1 }}>{b('100%', 38)}</div>
+      <div style={{ flex:1 }}>{b('100%',44)}</div>
     </div>
   );
 }
  
-// ── Feature card ──────────────────────────────────────────────────────────────
 function FeatureCard({ stock, rank }) {
   if (!stock) return <SkeletonCard/>;
   const sc      = Math.min(stock.score || 0, 6);
@@ -151,24 +145,22 @@ function FeatureCard({ stock, rank }) {
     <div style={{
       background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:`3px solid ${C.gold}`,
       borderRadius:2, padding:'24px 22px', position:'relative', animation:'fadeUp 0.4s ease both',
-      // flex column + height 100% makes this card fill its wrapper and match siblings
       display:'flex', flexDirection:'column', height:'100%',
     }}>
-      {/* Header */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16 }}>
-        <div>
+        <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:6 }}>
             Rank {medals[rank - 1]}
           </div>
-          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4, flexWrap:'wrap' }}>
             <span style={{ fontSize:26, fontWeight:700, fontFamily:FONTS, color:'#F1EFE8', letterSpacing:'0.02em' }}>{stock.ticker}</span>
-            <span style={{ fontSize:9, fontFamily:SANS, padding:'2px 6px', borderRadius:2, letterSpacing:'0.08em', background:'rgba(184,160,112,0.15)', color:C.gold, border:`0.5px solid rgba(184,160,112,0.3)` }}>
+            <span style={{ fontSize:9, fontFamily:SANS, padding:'2px 6px', borderRadius:2, letterSpacing:'0.08em', background:'rgba(184,160,112,0.15)', color:C.gold, border:`0.5px solid rgba(184,160,112,0.3)`, flexShrink:0 }}>
               {stock.exchange || (US_SET.has(stock.ticker) ? 'NYSE' : 'INTL')}
             </span>
           </div>
           <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company || ''}</div>
         </div>
-        <div style={{ textAlign:'right', flexShrink:0 }}>
+        <div style={{ textAlign:'right', flexShrink:0, marginLeft:12 }}>
           <div style={{ fontSize:26, fontWeight:400, fontFamily:MONO, color:scoreColor, lineHeight:1 }}>
             {sc}<span style={{ color:'rgba(154,152,144,0.5)' }}>/6</span>
           </div>
@@ -178,14 +170,12 @@ function FeatureCard({ stock, rank }) {
         </div>
       </div>
  
-      {/* Price */}
       <div style={{ marginBottom:14 }}>
         <span style={{ fontSize:18, fontFamily:MONO, fontWeight:400, color:'#F1EFE8' }}>{stock.price || '--'}</span>
         {stock.change && <span style={{ fontSize:12, marginLeft:8, color:chgPos ? '#80C080' : C.red, fontFamily:MONO }}>{stock.change}</span>}
         {stock.marketCap && <span style={{ fontSize:11, marginLeft:8, color:C.txLight, fontFamily:SANS }}>{stock.marketCap}</span>}
       </div>
  
-      {/* 6 signal pills */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
         {SIG_LABELS.map((label, i) => {
           const sig = (stock.signals || [])[i] || {};
@@ -193,12 +183,11 @@ function FeatureCard({ stock, rank }) {
         })}
       </div>
  
-      {/* Summary — flex:1 pushes it to fill remaining height, equalising all cards */}
-      <div style={{ flex:1, padding:'10px 12px', background:'rgba(241,239,232,0.04)', borderRadius:2, border:`0.5px solid rgba(184,160,112,0.2)`, minHeight:44 }}>
+      {/* flex:1 + minHeight ensures summary block fills remaining space, equalising card heights */}
+      <div style={{ flex:1, minHeight:44, padding:'10px 12px', background:'rgba(241,239,232,0.04)', borderRadius:2, border:`0.5px solid rgba(184,160,112,0.2)` }}>
         <span style={{ fontSize:11, color:C.txLight, fontFamily:SANS, lineHeight:1.55 }}>{stock.summary || ''}</span>
       </div>
  
-      {/* Timestamp */}
       <div style={{ position:'absolute', top:14, right:18, fontSize:9, color:'rgba(154,152,144,0.5)', fontFamily:MONO }}>
         {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
       </div>
@@ -206,7 +195,6 @@ function FeatureCard({ stock, rank }) {
   );
 }
  
-// ── Compact result card ───────────────────────────────────────────────────────
 function ResultCard({ stock, rank }) {
   const sc      = Math.min(stock.score || 0, 6);
   const rating  = getRating(sc);
@@ -267,15 +255,12 @@ function ResultCard({ stock, rank }) {
         </div>
       )}
       {stock.error && (
-        <div style={{ fontSize:11, color:C.red, borderTop:`0.5px solid ${C.border}`, paddingTop:8, fontFamily:SANS }}>
-          Error: {stock.error}
-        </div>
+        <div style={{ fontSize:11, color:C.red, borderTop:`0.5px solid ${C.border}`, paddingTop:8, fontFamily:SANS }}>Error: {stock.error}</div>
       )}
     </div>
   );
 }
  
-// ── Main page ─────────────────────────────────────────────────────────────────
 export default function Home() {
   const [input, setInput]               = useState('');
   const [results, setResults]           = useState([]);
@@ -299,7 +284,7 @@ export default function Home() {
         if (!live || !Array.isArray(candidates) || !candidates.length) { if (live) setTopStatus('No candidates found'); return; }
         setTopStatus(`Analysing top ${candidates.length} picks…`);
         const analyseRes = await fetch('/api/analyse', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ tickers: candidates }),
         });
         if (!live || !analyseRes.ok) { if (live) setTopStatus('Analysis failed'); return; }
@@ -319,7 +304,7 @@ export default function Home() {
     setScanning(true); setStatus(`Analysing ${tickers.length} securities…`);
     try {
       const res = await fetch('/api/analyse', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ tickers }),
       });
       if (!res.ok) { const e = await res.json(); throw new Error(e.error || `HTTP ${res.status}`); }
@@ -375,8 +360,6 @@ export default function Home() {
       </Head>
  
       <div style={{ background:C.pageBg, minHeight:'100vh', color:C.tx, fontFamily:SANS }}>
- 
-        {/* Header */}
         <div style={{ background:C.deepBg, borderBottom:`1px solid rgba(184,160,112,0.3)`, padding:'0 32px' }}>
           <div style={{ maxWidth:1200, margin:'0 auto', display:'flex', alignItems:'center', justifyContent:'space-between', height:64 }}>
             <div style={{ display:'flex', alignItems:'center', gap:16 }}>
@@ -399,30 +382,20 @@ export default function Home() {
         </div>
  
         <div style={{ maxWidth:1200, margin:'0 auto', padding:'32px 32px 80px' }}>
- 
-          {/* Top Picks — equal height via CSS grid */}
           <div style={{ marginBottom:40 }}>
             <div style={{ display:'flex', alignItems:'baseline', gap:16, marginBottom:20 }}>
               <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>Top Picks Today</h2>
               <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
               <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
             </div>
-            {/*
-              CSS grid with 3 equal columns + align-items:stretch.
-              Each cell is a flex column so FeatureCard (height:100%) fills it.
-              This is more reliable than flexbox for equal heights across cells
-              whose content sizes differ.
-            */}
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:16, alignItems:'stretch' }}>
+            {/* CSS grid — guarantees all 3 cells are identical width AND height */}
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}>
               {[0, 1, 2].map(i => (
-                <div key={i} style={{ display:'flex', flexDirection:'column' }}>
-                  <FeatureCard stock={topPicks[i]} rank={i + 1}/>
-                </div>
+                <FeatureCard key={i} stock={topPicks[i]} rank={i + 1}/>
               ))}
             </div>
           </div>
  
-          {/* Custom Scan */}
           <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:32 }}>
             <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em', whiteSpace:'nowrap' }}>Custom Scan</h2>
             <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
@@ -492,16 +465,13 @@ export default function Home() {
               <span style={{ fontSize:10, color:C.txLight, fontFamily:MONO, flex:1, letterSpacing:'0.06em' }}>{filtered.length} securities ready to export</span>
               <button onClick={() => {
                 const hdr = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs50dMA','Insider','Analyst','PE peers','Summary'];
-                const rows = filtered.map((r, i) => {
-                  const g = r.signals || [];
-                  return [i+1, r.ticker, `"${(r.company||'').replace(/"/g,'""')}"`, r.score||0, r.price||'', r.change||'', r.marketCap||'', g[0]?.value||'', g[1]?.value||'', g[2]?.value||'', g[3]?.value||'', g[4]?.value||'', g[5]?.value||'', `"${(r.summary||'').replace(/"/g,'""')}"`].join(',');
-                });
-                const blob = new Blob([[hdr.join(',')].concat(rows).join('\n')], { type:'text/csv' });
-                const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `signals_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+                const rows = filtered.map((r, i) => { const g = r.signals || []; return [i+1,r.ticker,`"${(r.company||'').replace(/"/g,'""')}"`,r.score||0,r.price||'',r.change||'',r.marketCap||'',g[0]?.value||'',g[1]?.value||'',g[2]?.value||'',g[3]?.value||'',g[4]?.value||'',g[5]?.value||'',`"${(r.summary||'').replace(/"/g,'""')}"`].join(','); });
+                const blob = new Blob([[hdr.join(',')].concat(rows).join('\n')],{type:'text/csv'});
+                const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`signals_${new Date().toISOString().slice(0,10)}.csv`; a.click();
               }} style={{ padding:'8px 18px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:11, fontFamily:SANS, letterSpacing:'0.06em' }}>Export CSV</button>
               <button onClick={() => {
-                const blob = new Blob([JSON.stringify(filtered.map((r, i) => ({ rank:i+1, ...r })), null, 2)], { type:'application/json' });
-                const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `signals_${new Date().toISOString().slice(0,10)}.json`; a.click();
+                const blob = new Blob([JSON.stringify(filtered.map((r,i)=>({rank:i+1,...r})),null,2)],{type:'application/json'});
+                const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`signals_${new Date().toISOString().slice(0,10)}.json`; a.click();
               }} style={{ padding:'8px 18px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:11, fontFamily:SANS, letterSpacing:'0.06em' }}>Export JSON</button>
             </div>
           )}
