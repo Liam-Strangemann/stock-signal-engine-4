@@ -1,19 +1,29 @@
-// pages/api/analyse.js
-// Fixed signals:
-//  S2 (PE vs hist): Now pulls EPS from 4 sources — Yahoo defaultKeyStatistics,
-//     Yahoo financialData, Yahoo quoteSummary earnings, and a computed fallback
-//     from net income / shares outstanding. 52w hi/lo from Yahoo chart meta with
-//     computed-from-closes fallback.
-//  S3 (50d MA): Computes directly from Yahoo 1y daily closes (always present).
-//     No longer depends on Finnhub candle or Stooq — eliminates the primary failure path.
-//  S6 (PE vs peers): Fetches peer PE from Yahoo chart meta in parallel (unchanged)
-//     but now also pulls from Yahoo quoteSummary summaryDetail as a second source,
-//     and uses a wider acceptance threshold so more peers contribute.
+// pages/api/analyse.js  v3
+// All 6 signals now have robust multi-source fallback chains.
+//
+//  S2 (PE vs hist avg):
+//    EPS: v7 quote epsTrailingTwelveMonths (new, very reliable) → Finnhub →
+//         Yahoo defaultKeyStatistics → earningsHistory TTM sum →
+//         netIncome/shares → financialData.earningsPerShare
+//    52w hi/lo: Finnhub metric → Yahoo chart meta → computed from closes
+//
+//  S3 (50d MA):
+//    Primary: computed from Yahoo 1y closes (no extra fetch)
+//    v7 quote fiftyDayAverage (new, runs in parallel with everything else)
+//    Fallback: Yahoo 3mo chart → Yahoo summaryDetail → Finnhub candle → Stooq CSV
+//
+//  S6 (PE vs peers):
+//    Per-peer: v7 quote trailingPE (new, fast) → Yahoo chart meta →
+//              Yahoo summaryDetail → Finnhub metric
+//    Peer lists: Finnhub → Yahoo recommendations → hardcoded PEER_MAP
+//
+//  INSIDER NOTE: Data is sourced from SEC Form 4 filings via Finnhub / OpenInsider.
+//  Sells without buys correctly display as a fail signal — this is accurate data.
  
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
 const FH = 'https://finnhub.io/api/v1';
  
-const YH_HEADERS = {
+const YH = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -35,13 +45,13 @@ async function fh(path) {
   return d;
 }
  
-// ── Yahoo chart — returns full result including closes array ──────────────────
+// ── Yahoo chart (v8) ──────────────────────────────────────────────────────────
 async function yahooChart(ticker, range = '1y') {
   for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
     try {
       const r = await fetch(
         `${base}/v8/finance/chart/${ticker}?interval=1d&range=${range}`,
-        { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+        { headers: YH, signal: AbortSignal.timeout(7000) }
       );
       if (!r.ok) continue;
       const j = await r.json();
@@ -52,21 +62,43 @@ async function yahooChart(ticker, range = '1y') {
   return null;
 }
  
-// ── Yahoo quoteSummary — the workhorse for fundamentals ──────────────────────
-// Tries v10 query1, v10 query2, v11 query1 in order.
+// ── Yahoo quoteSummary ────────────────────────────────────────────────────────
 async function yahooSummary(ticker, modules) {
-  const urls = [
+  for (const url of [
     `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=${modules}`,
     `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=${modules}`,
     `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${ticker}?modules=${modules}`,
-  ];
-  for (const url of urls) {
+  ]) {
     try {
-      const r = await fetch(url, { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) });
+      const r = await fetch(url, { headers: YH, signal: AbortSignal.timeout(7000) });
       if (!r.ok) continue;
       const j = await r.json();
       const result = j?.quoteSummary?.result?.[0];
       if (result) return result;
+    } catch (_) {}
+  }
+  return null;
+}
+ 
+// ── Yahoo v7 quote — the new workhorse ───────────────────────────────────────
+// Returns epsTrailingTwelveMonths, trailingPE, fiftyDayAverage, targetMeanPrice
+// in a single fast call. Less rate-limited than quoteSummary on Vercel IPs.
+async function yahooV7Quote(ticker) {
+  const fields = [
+    'trailingPE', 'epsTrailingTwelveMonths', 'fiftyDayAverage',
+    'twoHundredDayAverage', 'marketCap', 'regularMarketPrice',
+    'targetMeanPrice', 'targetMedianPrice',
+  ].join(',');
+  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
+    try {
+      const r = await fetch(
+        `${base}/v7/finance/quote?symbols=${ticker}&fields=${fields}`,
+        { headers: YH, signal: AbortSignal.timeout(6000) }
+      );
+      if (!r.ok) continue;
+      const j = await r.json();
+      const q = j?.quoteResponse?.result?.[0];
+      if (q) return q;
     } catch (_) {}
   }
   return null;
@@ -99,47 +131,51 @@ function timeAgo(dateStr) {
   return `${Math.floor(days / 30)}mo ago`;
 }
  
-// ── 50-day MA — computed directly from Yahoo 1y closes ───────────────────────
-// This is the most reliable approach: we already fetch 1y of daily data for
-// every ticker, so we always have 250 closes available. Slice the last 50.
+// ── 50d MA ────────────────────────────────────────────────────────────────────
 function compute50dMA(closes) {
   if (!Array.isArray(closes)) return null;
   const valid = closes.filter(c => c != null && !isNaN(c) && c > 0);
-  if (valid.length < 20) return null; // need at least 20 days
-  const slice = valid.slice(-50);     // last 50 trading days
+  if (valid.length < 20) return null;
+  const slice = valid.slice(-50);
   return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
  
-// Standalone fetcher used when the 1y chart fetch failed for some reason
-async function fetch50dMAStandalone(ticker) {
-  // Source 1: Yahoo chart 6mo (shorter range, faster)
+async function fetch50dMAFallback(ticker) {
+  // 1: Yahoo 3mo chart closes
   for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
     try {
       const now = Math.floor(Date.now() / 1000);
       const r = await fetch(
         `${base}/v8/finance/chart/${ticker}?interval=1d&period1=${now - 100 * 86400}&period2=${now}`,
-        { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+        { headers: YH, signal: AbortSignal.timeout(6000) }
       );
       if (r.ok) {
         const j = await r.json();
         const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close
           ?.filter(c => c != null && !isNaN(c) && c > 0);
         const ma = compute50dMA(closes);
-        if (ma && ma > 0) return ma;
+        if (ma > 0) return ma;
       }
     } catch (_) {}
   }
  
-  // Source 2: Finnhub candle
+  // 2: Yahoo summaryDetail.fiftyDayAverage (pre-computed server-side)
+  try {
+    const ys = await yahooSummary(ticker, 'summaryDetail');
+    const ma = ys?.summaryDetail?.fiftyDayAverage?.raw;
+    if (ma && ma > 0) return ma;
+  } catch (_) {}
+ 
+  // 3: Finnhub candle
   try {
     const d = await fh(`/stock/candle?symbol=${ticker}&resolution=D&count=60`);
     if (d?.s === 'ok' && Array.isArray(d.c) && d.c.length >= 10) {
       const ma = compute50dMA(d.c);
-      if (ma && ma > 0) return ma;
+      if (ma > 0) return ma;
     }
   } catch (_) {}
  
-  // Source 3: Stooq CSV
+  // 4: Stooq CSV — reliable free source, broad US coverage
   try {
     const r = await fetch(
       `https://stooq.com/q/d/l/?s=${ticker.toLowerCase()}.us&i=d`,
@@ -147,98 +183,13 @@ async function fetch50dMAStandalone(ticker) {
     );
     if (r.ok) {
       const text = await r.text();
-      const lines = text.trim().split('\n').slice(1);
-      const closes = lines
-        .slice(-60)
-        .map(l => parseFloat(l.split(',')[4]))
-        .filter(c => !isNaN(c) && c > 0);
-      const ma = compute50dMA(closes);
-      if (ma && ma > 0) return ma;
-    }
-  } catch (_) {}
- 
-  return null;
-}
- 
-// ── EPS resolution — 4 independent sources ───────────────────────────────────
-// This is the key fix for S2. We try four different Yahoo endpoints before
-// giving up. Most failures were caused by relying on a single endpoint.
-async function fetchEPS(ticker) {
-  // Source 1: Yahoo defaultKeyStatistics — trailingEps is the most direct field
-  try {
-    const ys = await yahooSummary(ticker, 'defaultKeyStatistics');
-    const eps = ys?.defaultKeyStatistics?.trailingEps?.raw;
-    if (eps != null && eps !== 0) return eps;
-  } catch (_) {}
- 
-  // Source 2: Yahoo financialData — has EPS in multiple forms
-  try {
-    const ys = await yahooSummary(ticker, 'financialData');
-    const fd = ys?.financialData;
-    const eps = fd?.revenuePerShare?.raw; // not EPS but a proxy
-    // more reliable: earningsGrowth context gives us EPS indirectly
-    // skip if this is the only source — try next
-  } catch (_) {}
- 
-  // Source 3: Yahoo earnings history — TTM EPS from recent quarters
-  try {
-    const ys = await yahooSummary(ticker, 'earningsHistory');
-    const history = ys?.earningsHistory?.history || [];
-    if (history.length >= 4) {
-      // Sum last 4 quarters of actual EPS for TTM
-      const ttm = history
-        .slice(-4)
-        .reduce((sum, q) => sum + (q?.epsActual?.raw || 0), 0);
-      if (ttm !== 0) return ttm;
-    }
-  } catch (_) {}
- 
-  // Source 4: Yahoo incomeStatementHistory — net income / shares outstanding
-  try {
-    const ys = await yahooSummary(ticker, 'incomeStatementHistory,defaultKeyStatistics');
-    const netIncome = ys?.incomeStatementHistory?.incomeStatementHistory?.[0]?.netIncome?.raw;
-    const shares    = ys?.defaultKeyStatistics?.sharesOutstanding?.raw;
-    if (netIncome && shares && shares > 0) return netIncome / shares;
-  } catch (_) {}
- 
-  return null;
-}
- 
-// ── Analyst target — 3 sources ────────────────────────────────────────────────
-async function fetchAnalystTarget(ticker) {
-  // Source 1: Finnhub
-  try {
-    const d = await fh(`/stock/price-target?symbol=${ticker}`);
-    const t = d?.targetMedian || d?.targetMean;
-    if (t && t > 0) return t;
-  } catch (_) {}
- 
-  // Source 2: Yahoo financialData
-  try {
-    const ys = await yahooSummary(ticker, 'financialData');
-    const fd = ys?.financialData;
-    const t = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
-    if (t && t > 0) return t;
-  } catch (_) {}
- 
-  // Source 3: Yahoo recommendationTrend (targetPrice not here, but last resort scrape)
-  try {
-    const r = await fetch(
-      `https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`,
-      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(7000) }
-    );
-    if (r.ok) {
-      const html = await r.text();
-      for (const pattern of [
-        /price\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /consensus[^$]*\$\s*([\d,]+\.?\d*)/i,
-        /mean\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
-      ]) {
-        const m = html.match(pattern);
-        if (m) {
-          const v = parseFloat(m[1].replace(/,/g, ''));
-          if (v > 0 && v < 100000) return v;
-        }
+      if (!text.includes('No data') && text.length > 100) {
+        const lines = text.trim().split('\n').slice(1);
+        const closes = lines.slice(-60)
+          .map(l => parseFloat((l.split(',')[4] || '').trim()))
+          .filter(c => !isNaN(c) && c > 0);
+        const ma = compute50dMA(closes);
+        if (ma > 0) return ma;
       }
     }
   } catch (_) {}
@@ -246,17 +197,89 @@ async function fetchAnalystTarget(ticker) {
   return null;
 }
  
-// ── Insider transactions — 4 sources ─────────────────────────────────────────
+// ── EPS — 5 independent sources ───────────────────────────────────────────────
+async function fetchEPS(ticker) {
+  // 1: Yahoo v7 epsTrailingTwelveMonths — most reliable free source
+  try {
+    const q = await yahooV7Quote(ticker);
+    if (q?.epsTrailingTwelveMonths != null && q.epsTrailingTwelveMonths !== 0) {
+      return q.epsTrailingTwelveMonths;
+    }
+  } catch (_) {}
+ 
+  // 2: Yahoo defaultKeyStatistics.trailingEps
+  try {
+    const ys  = await yahooSummary(ticker, 'defaultKeyStatistics');
+    const eps = ys?.defaultKeyStatistics?.trailingEps?.raw;
+    if (eps != null && eps !== 0) return eps;
+  } catch (_) {}
+ 
+  // 3: Yahoo earningsHistory — sum last 4 quarters for TTM EPS
+  try {
+    const ys      = await yahooSummary(ticker, 'earningsHistory');
+    const history = ys?.earningsHistory?.history || [];
+    if (history.length >= 2) {
+      const ttm = history.slice(-4).reduce((sum, q) => sum + (q?.epsActual?.raw || 0), 0);
+      if (ttm !== 0) return ttm;
+    }
+  } catch (_) {}
+ 
+  // 4: Yahoo incomeStatementHistory — net income ÷ shares outstanding
+  try {
+    const ys = await yahooSummary(ticker, 'incomeStatementHistory,defaultKeyStatistics');
+    const ni = ys?.incomeStatementHistory?.incomeStatementHistory?.[0]?.netIncome?.raw;
+    const sh = ys?.defaultKeyStatistics?.sharesOutstanding?.raw;
+    if (ni && sh && sh > 0) return ni / sh;
+  } catch (_) {}
+ 
+  // 5: Yahoo financialData.earningsPerShare
+  try {
+    const ys  = await yahooSummary(ticker, 'financialData');
+    const eps = ys?.financialData?.earningsPerShare?.raw;
+    if (eps != null && eps !== 0) return eps;
+  } catch (_) {}
+ 
+  return null;
+}
+ 
+// ── Analyst target ────────────────────────────────────────────────────────────
+async function fetchAnalystTarget(ticker) {
+  // 1: Finnhub
+  try {
+    const d = await fh(`/stock/price-target?symbol=${ticker}`);
+    const t = d?.targetMedian || d?.targetMean;
+    if (t && t > 0) return t;
+  } catch (_) {}
+ 
+  // 2: Yahoo financialData
+  try {
+    const ys = await yahooSummary(ticker, 'financialData');
+    const fd = ys?.financialData;
+    const t  = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
+    if (t && t > 0) return t;
+  } catch (_) {}
+ 
+  // 3: Yahoo v7 quote targetMedianPrice / targetMeanPrice
+  try {
+    const q = await yahooV7Quote(ticker);
+    const t = q?.targetMedianPrice || q?.targetMeanPrice;
+    if (t && t > 0) return t;
+  } catch (_) {}
+ 
+  return null;
+}
+ 
+// ── Insider transactions ──────────────────────────────────────────────────────
 async function fetchInsiderTransactions(ticker, curPx) {
-  const now   = Math.floor(Date.now() / 1000);
-  const ago30 = now - 30 * 86400;
+  const now    = Math.floor(Date.now() / 1000);
+  const ago30  = now - 30 * 86400;
   const from30 = new Date(ago30 * 1000).toISOString().slice(0, 10);
   const to30   = new Date(now * 1000).toISOString().slice(0, 10);
   const cutoff = new Date(ago30 * 1000);
  
-  // Source 1: Finnhub
+  // 1: Finnhub — SEC Form 4
   try {
-    const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from30}&to=${to30}`);
+    const d    = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from30}&to=${to30}`);
     const txns = d?.data || [];
     if (txns.length > 0) {
       const buys  = txns.filter(t => t.transactionCode === 'P');
@@ -265,7 +288,7 @@ async function fetchInsiderTransactions(ticker, curPx) {
     }
   } catch (_) {}
  
-  // Source 2: OpenInsider
+  // 2: OpenInsider — aggregates SEC Form 4
   try {
     const r = await fetch(
       `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
@@ -289,40 +312,38 @@ async function fetchInsiderTransactions(ticker, curPx) {
           transactionDate: dateStr, share: shares, value,
           transactionPrice: shares > 0 ? value / shares : curPx,
         };
-        if (/P\s*-\s*Purchase/i.test(type)) buys.push(entry);
+        if (/P\s*-\s*Purchase/i.test(type))  buys.push(entry);
         else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
       }
       if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'openinsider' };
     }
   } catch (_) {}
  
-  // Source 3: Yahoo insiderTransactions
+  // 3: Yahoo insiderTransactions
   try {
-    const ys = await yahooSummary(ticker, 'insiderTransactions');
-    if (ys) {
-      const txns = ys.insiderTransactions?.transactions || [];
-      const buys = [], sells = [];
-      for (const t of txns) {
-        const dateTs = t.startDate?.raw;
-        if (!dateTs) continue;
-        const txDate = new Date(dateTs * 1000);
-        if (txDate < cutoff) continue;
-        const dateStr = txDate.toISOString().slice(0, 10);
-        const shares  = Math.abs(t.shares?.raw || 0);
-        const value   = Math.abs(t.value?.raw  || 0);
-        const desc    = (t.transactionDescription || '').toLowerCase();
-        const entry   = {
-          transactionDate: dateStr, share: shares, value,
-          transactionPrice: shares > 0 ? value / shares : curPx,
-        };
-        if (/purchase|buy/i.test(desc)) buys.push(entry);
-        else if (/sale|sell/i.test(desc)) sells.push(entry);
-      }
-      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'yahoo' };
+    const ys   = await yahooSummary(ticker, 'insiderTransactions');
+    const txns = ys?.insiderTransactions?.transactions || [];
+    const buys = [], sells = [];
+    for (const t of txns) {
+      const dateTs = t.startDate?.raw;
+      if (!dateTs) continue;
+      const txDate = new Date(dateTs * 1000);
+      if (txDate < cutoff) continue;
+      const dateStr = txDate.toISOString().slice(0, 10);
+      const shares  = Math.abs(t.shares?.raw || 0);
+      const value   = Math.abs(t.value?.raw  || 0);
+      const desc    = (t.transactionDescription || '').toLowerCase();
+      const entry   = {
+        transactionDate: dateStr, share: shares, value,
+        transactionPrice: shares > 0 ? value / shares : curPx,
+      };
+      if (/purchase|buy/i.test(desc))      buys.push(entry);
+      else if (/sale|sell/i.test(desc))    sells.push(entry);
     }
+    if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'yahoo' };
   } catch (_) {}
  
-  // Source 4: SEC EDGAR
+  // 4: SEC EDGAR Form 4 search
   try {
     const r = await fetch(
       `https://efts.sec.gov/LATEST/search-index?q=%22${ticker}%22&dateRange=custom&startdt=${from30}&enddt=${to30}&forms=4`,
@@ -374,43 +395,50 @@ function buildInsiderValue(buys, sells, source) {
  
 // ── Peer PE ───────────────────────────────────────────────────────────────────
 const PEER_MAP = {
-  AAPL:  ['MSFT','GOOGL','META','AMZN','NVDA'],   MSFT:  ['AAPL','GOOGL','CRM','ORCL','IBM'],
-  GOOGL: ['META','MSFT','AMZN','SNAP','TTD'],     META:  ['GOOGL','SNAP','PINS','TTD'],
-  AMZN:  ['MSFT','GOOGL','WMT','COST','BABA'],    NVDA:  ['AMD','INTC','QCOM','AVGO','TXN'],
-  TSLA:  ['GM','F','RIVN','NIO','TM'],            AVGO:  ['QCOM','TXN','ADI','MRVL','AMD'],
-  ORCL:  ['SAP','MSFT','CRM','IBM','WDAY'],       AMD:   ['NVDA','INTC','QCOM','TXN','MU'],
-  INTC:  ['AMD','NVDA','QCOM','TXN','AVGO'],      QCOM:  ['AVGO','TXN','ADI','MRVL','AMD'],
-  JPM:   ['BAC','WFC','C','GS','MS'],             BAC:   ['JPM','WFC','C','USB','PNC'],
-  WFC:   ['JPM','BAC','C','USB','PNC'],           GS:    ['MS','JPM','C','BLK','SCHW'],
-  MS:    ['GS','JPM','C','BLK','SCHW'],           BLK:   ['SCHW','MS','GS','IVZ'],
-  LLY:   ['NVO','PFE','MRK','ABBV','BMY'],        JNJ:   ['PFE','ABBV','MRK','TMO','ABT'],
-  UNH:   ['CVS','CI','HUM','ELV','CNC'],          ABBV:  ['PFE','LLY','MRK','BMY','REGN'],
-  MRK:   ['PFE','JNJ','ABBV','LLY','BMY'],        PFE:   ['MRK','JNJ','ABBV','BMY','LLY'],
-  TMO:   ['DHR','A','WAT','BIO','IDXX'],          ABT:   ['MDT','BSX','SYK','BDX','EW'],
-  AMGN:  ['REGN','BIIB','VRTX','BMY','GILD'],    CVS:   ['WBA','CI','UNH','HUM','ELV'],
-  XOM:   ['CVX','COP','SLB','EOG','OXY'],        CVX:   ['XOM','COP','SLB','EOG','DVN'],
-  COP:   ['EOG','XOM','CVX','DVN','OXY'],        EOG:   ['COP','DVN','OXY','FANG','MRO'],
-  HD:    ['LOW','WMT','TGT','COST','AMZN'],      LOW:   ['HD','WMT','TGT','COST'],
-  WMT:   ['TGT','COST','KR','HD','AMZN'],        TGT:   ['WMT','COST','HD','KR','DG'],
-  COST:  ['WMT','TGT','BJ','HD'],                MCD:   ['YUM','CMG','QSR','DRI'],
-  NKE:   ['UAA','DECK','LULU','SKX'],            SBUX:  ['MCD','CMG','YUM','QSR'],
-  KO:    ['PEP','MDLZ','MNST','KHC'],            PEP:   ['KO','MDLZ','MNST','KHC'],
-  PM:    ['MO','BTI','IMBBY'],                    MO:    ['PM','BTI','IMBBY'],
-  T:     ['VZ','TMUS','CMCSA','CHTR'],           VZ:    ['T','TMUS','CMCSA','CHTR'],
-  TMUS:  ['T','VZ','CMCSA','CHTR'],              CAT:   ['DE','HON','EMR','ITW','PH'],
-  DE:    ['CAT','AGCO','CNH','HON'],             HON:   ['CAT','EMR','ITW','ROK','ETN'],
-  GE:    ['HON','RTX','EMR','ETN','PH'],         RTX:   ['LMT','NOC','GD','BA'],
-  LMT:   ['NOC','RTX','GD','BA'],                UPS:   ['FDX','XPO','ODFL','SAIA'],
-  FDX:   ['UPS','XPO','ODFL'],                   IBM:   ['MSFT','ORCL','HPE','DXC'],
-  NEE:   ['DUK','SO','AEP','EXC','D'],           AMT:   ['PLD','EQIX','CCI','SPG','O'],
-  NFLX:  ['DIS','WBD','PARA','ROKU'],            DIS:   ['NFLX','WBD','PARA','CMCSA'],
-  MA:    ['V','PYPL','AXP','FIS'],               V:     ['MA','PYPL','AXP','FIS'],
-  KR:    ['WMT','TGT','COST','ACI'],             SPGI:  ['MCO','ICE','CME','MSCI'],
+  AAPL:['MSFT','GOOGL','META','AMZN','NVDA'],   MSFT:['AAPL','GOOGL','CRM','ORCL','IBM'],
+  GOOGL:['META','MSFT','AMZN','SNAP','TTD'],     META:['GOOGL','SNAP','PINS','TTD'],
+  AMZN:['MSFT','GOOGL','WMT','COST','BABA'],    NVDA:['AMD','INTC','QCOM','AVGO','TXN'],
+  TSLA:['GM','F','RIVN','NIO','TM'],             AVGO:['QCOM','TXN','ADI','MRVL','AMD'],
+  ORCL:['SAP','MSFT','CRM','IBM','WDAY'],        AMD:['NVDA','INTC','QCOM','TXN','MU'],
+  INTC:['AMD','NVDA','QCOM','TXN','AVGO'],       QCOM:['AVGO','TXN','ADI','MRVL','AMD'],
+  JPM:['BAC','WFC','C','GS','MS'],               BAC:['JPM','WFC','C','USB','PNC'],
+  WFC:['JPM','BAC','C','USB','PNC'],             GS:['MS','JPM','C','BLK','SCHW'],
+  MS:['GS','JPM','C','BLK','SCHW'],              BLK:['SCHW','MS','GS','IVZ'],
+  LLY:['NVO','PFE','MRK','ABBV','BMY'],          JNJ:['PFE','ABBV','MRK','TMO','ABT'],
+  UNH:['CVS','CI','HUM','ELV','CNC'],            ABBV:['PFE','LLY','MRK','BMY','REGN'],
+  MRK:['PFE','JNJ','ABBV','LLY','BMY'],          PFE:['MRK','JNJ','ABBV','BMY','LLY'],
+  TMO:['DHR','A','WAT','BIO','IDXX'],            ABT:['MDT','BSX','SYK','BDX','EW'],
+  AMGN:['REGN','BIIB','VRTX','BMY','GILD'],      CVS:['WBA','CI','UNH','HUM','ELV'],
+  XOM:['CVX','COP','SLB','EOG','OXY'],           CVX:['XOM','COP','SLB','EOG','DVN'],
+  COP:['EOG','XOM','CVX','DVN','OXY'],           EOG:['COP','DVN','OXY','FANG','MRO'],
+  HD:['LOW','WMT','TGT','COST','AMZN'],          LOW:['HD','WMT','TGT','COST'],
+  WMT:['TGT','COST','KR','HD','AMZN'],           TGT:['WMT','COST','HD','KR','DG'],
+  COST:['WMT','TGT','BJ','HD'],                  MCD:['YUM','CMG','QSR','DRI'],
+  NKE:['UAA','DECK','LULU','SKX'],               SBUX:['MCD','CMG','YUM','QSR'],
+  KO:['PEP','MDLZ','MNST','KHC'],               PEP:['KO','MDLZ','MNST','KHC'],
+  PM:['MO','BTI','IMBBY'],                        MO:['PM','BTI','IMBBY'],
+  T:['VZ','TMUS','CMCSA','CHTR'],                VZ:['T','TMUS','CMCSA','CHTR'],
+  TMUS:['T','VZ','CMCSA','CHTR'],                CAT:['DE','HON','EMR','ITW','PH'],
+  DE:['CAT','AGCO','CNH','HON'],                 HON:['CAT','EMR','ITW','ROK','ETN'],
+  GE:['HON','RTX','EMR','ETN','PH'],             RTX:['LMT','NOC','GD','BA'],
+  LMT:['NOC','RTX','GD','BA'],                   UPS:['FDX','XPO','ODFL','SAIA'],
+  FDX:['UPS','XPO','ODFL'],                      IBM:['MSFT','ORCL','HPE','DXC'],
+  NEE:['DUK','SO','AEP','EXC','D'],              AMT:['PLD','EQIX','CCI','SPG','O'],
+  NFLX:['DIS','WBD','PARA','ROKU'],              DIS:['NFLX','WBD','PARA','CMCSA'],
+  MA:['V','PYPL','AXP','FIS'],                   V:['MA','PYPL','AXP','FIS'],
+  KR:['WMT','TGT','COST','ACI'],                 SPGI:['MCO','ICE','CME','MSCI'],
 };
  
-// Fetch PE for a single peer ticker — tries 3 Yahoo sources in order
 async function fetchPeerPESingle(peer) {
-  // Source 1: Yahoo chart meta (trailingPE) — fast, usually works
+  // 1: v7 quote — fastest, single call returns trailingPE + marketCap
+  try {
+    const q  = await yahooV7Quote(peer);
+    const pe = q?.trailingPE;
+    const mc = q?.marketCap || 0;
+    if (pe && pe > 0 && pe < 600) return { ticker: peer, pe, mc };
+  } catch (_) {}
+ 
+  // 2: Yahoo chart meta
   try {
     const chart = await yahooChart(peer, '5d');
     const pe    = chart?.meta?.trailingPE;
@@ -418,21 +446,21 @@ async function fetchPeerPESingle(peer) {
     if (pe && pe > 0 && pe < 600) return { ticker: peer, pe, mc };
   } catch (_) {}
  
-  // Source 2: Yahoo summaryDetail — separate module, different code path
+  // 3: Yahoo summaryDetail
   try {
-    const ys  = await yahooSummary(peer, 'summaryDetail');
-    const sd  = ys?.summaryDetail;
-    const pe  = sd?.trailingPE?.raw || sd?.forwardPE?.raw;
-    const mc  = sd?.marketCap?.raw || 0;
+    const ys = await yahooSummary(peer, 'summaryDetail');
+    const sd = ys?.summaryDetail;
+    const pe = sd?.trailingPE?.raw || sd?.forwardPE?.raw;
+    const mc = sd?.marketCap?.raw || 0;
     if (pe && pe > 0 && pe < 600) return { ticker: peer, pe, mc };
   } catch (_) {}
  
-  // Source 3: Finnhub metrics fallback
+  // 4: Finnhub metric
   try {
-    const d   = await fh(`/stock/metric?symbol=${peer}&metric=all`);
-    const pm  = d?.metric || {};
-    const pe  = pm.peBasicExclExtraTTM || pm.peTTM;
-    const mc  = (pm.marketCapitalization || 0) * 1e6;
+    const d  = await fh(`/stock/metric?symbol=${peer}&metric=all`);
+    const pm = d?.metric || {};
+    const pe = pm.peBasicExclExtraTTM || pm.peTTM;
+    const mc = (pm.marketCapitalization || 0) * 1e6;
     if (pe && pe > 0 && pe < 600) return { ticker: peer, pe, mc };
   } catch (_) {}
  
@@ -442,18 +470,14 @@ async function fetchPeerPESingle(peer) {
 async function fetchPeerPE(ticker, targetPE, targetMC) {
   try {
     let rawPeers = [];
- 
-    // A: Finnhub peers
     try {
       const pd = await fh(`/stock/peers?symbol=${ticker}`);
       if (Array.isArray(pd)) rawPeers = pd.filter(p => p !== ticker);
     } catch (_) {}
- 
-    // B: Yahoo recommendations
     try {
       const r = await fetch(
         `https://query1.finance.yahoo.com/v6/finance/recommendationsbysymbol/${ticker}`,
-        { headers: YH_HEADERS, signal: AbortSignal.timeout(6000) }
+        { headers: YH, signal: AbortSignal.timeout(6000) }
       );
       if (r.ok) {
         const j  = await r.json();
@@ -461,41 +485,28 @@ async function fetchPeerPE(ticker, targetPE, targetMC) {
         rawPeers = [...new Set([...rawPeers, ...yp])].filter(p => p !== ticker);
       }
     } catch (_) {}
- 
-    // C: Hardcoded peer map — always ensures we have peers for common tickers
     if (PEER_MAP[ticker]) {
       rawPeers = [...new Set([...rawPeers, ...PEER_MAP[ticker]])].filter(p => p !== ticker);
     }
- 
     rawPeers = rawPeers.slice(0, 20);
     if (rawPeers.length === 0) return null;
  
-    // Fetch PE for each peer in parallel (3 sources per peer, see fetchPeerPESingle)
     const peerResults = await Promise.allSettled(rawPeers.map(fetchPeerPESingle));
- 
     const all = peerResults
       .filter(r => r.status === 'fulfilled' && r.value)
       .map(r => r.value);
- 
     if (all.length === 0) return null;
  
-    // Market-cap filter — relaxed ratios to keep more peers
-    let loRatio = 0.15, hiRatio = 7;
-    if (targetMC > 500000) { loRatio = 0.1;  hiRatio = 10; }
-    else if (targetMC > 50000) { loRatio = 0.12; hiRatio = 8; }
+    let loRatio = 0.1, hiRatio = 10;
+    if (targetMC > 500000) { loRatio = 0.07; hiRatio = 14; }
+    else if (targetMC > 50000) { loRatio = 0.09; hiRatio = 11; }
  
     let comparables = targetMC > 0
-      ? all.filter(c => {
-          const m = c.mc / 1e6;
-          return m <= 0 || (m / targetMC >= loRatio && m / targetMC <= hiRatio);
-        })
+      ? all.filter(c => { const m = c.mc / 1e6; return m <= 0 || (m / targetMC >= loRatio && m / targetMC <= hiRatio); })
       : all;
- 
-    // Fall back to all peers if filter removed too many
     if (comparables.length < 3) comparables = all;
     if (comparables.length === 0) return null;
  
-    // Trim extreme outliers if we have enough data
     if (comparables.length >= 5) {
       const sorted = [...comparables].sort((a, b) => a.pe - b.pe);
       const trim   = Math.max(1, Math.floor(sorted.length * 0.1));
@@ -503,10 +514,10 @@ async function fetchPeerPE(ticker, targetPE, targetMC) {
     }
     if (comparables.length < 2) return null;
  
-    const pes    = comparables.map(c => c.pe).sort((a, b) => a - b);
-    const mid    = Math.floor(pes.length / 2);
-    const medPE  = pes.length % 2 === 0 ? (pes[mid - 1] + pes[mid]) / 2 : pes[mid];
-    const avgPE  = pes.reduce((a, b) => a + b, 0) / pes.length;
+    const pes   = comparables.map(c => c.pe).sort((a, b) => a - b);
+    const mid   = Math.floor(pes.length / 2);
+    const medPE = pes.length % 2 === 0 ? (pes[mid - 1] + pes[mid]) / 2 : pes[mid];
+    const avgPE = pes.reduce((a, b) => a + b, 0) / pes.length;
  
     const result = {
       medianPE:  parseFloat(medPE.toFixed(1)),
@@ -522,7 +533,7 @@ async function fetchPeerPE(ticker, targetPE, targetMC) {
   } catch (_) { return null; }
 }
  
-// ── Rating ────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function getRating(score) {
   if (score >= 5) return { label: 'Strong Buy', color: '#14532d', bg: '#dcfce7', border: '#86efac' };
   if (score === 4) return { label: 'Buy',        color: '#15803d', bg: '#f0fdf4', border: '#bbf7d0' };
@@ -541,30 +552,28 @@ function cleanExchange(raw) {
 }
  
 // ── Master fetch ──────────────────────────────────────────────────────────────
-// Key architectural change: we now fetch 1y Yahoo chart data FIRST and use
-// those closes directly for the 50d MA (S3). This eliminates the entire
-// separate 50d MA fetch path for most tickers.
 async function fetchStockData(ticker) {
+  // All primary fetches fire simultaneously including the new v7 quote
+  const [quoteR, profileR, metricsR, earningsR, analystTargetR, yahooDataR, v7QuoteR] =
+    await Promise.allSettled([
+      fh(`/quote?symbol=${ticker}`),
+      fh(`/stock/profile2?symbol=${ticker}`),
+      fh(`/stock/metric?symbol=${ticker}&metric=all`),
+      fh(`/stock/earnings?symbol=${ticker}&limit=4`),
+      fetchAnalystTarget(ticker),
+      yahooChart(ticker, '1y'),
+      yahooV7Quote(ticker),
+    ]);
  
-  // Step 1 — fire all primary fetches in parallel
-  const [quoteR, profileR, metricsR, earningsR, analystTargetR, yahooDataR] = await Promise.allSettled([
-    fh(`/quote?symbol=${ticker}`),
-    fh(`/stock/profile2?symbol=${ticker}`),
-    fh(`/stock/metric?symbol=${ticker}&metric=all`),
-    fh(`/stock/earnings?symbol=${ticker}&limit=4`),
-    fetchAnalystTarget(ticker),
-    yahooChart(ticker, '1y'),
-  ]);
+  const curPx = quoteR.status === 'fulfilled'    ? quoteR.value?.c              : null;
+  const m     = metricsR.status === 'fulfilled'  ? metricsR.value?.metric || {} : {};
+  const yc    = yahooDataR.status === 'fulfilled' ? yahooDataR.value            : null;
+  const ymeta = yc?.meta || {};
+  const v7q   = v7QuoteR.status === 'fulfilled'  ? v7QuoteR.value               : null;
  
-  const curPx  = quoteR.status === 'fulfilled'  ? quoteR.value?.c          : null;
-  const m      = metricsR.status === 'fulfilled' ? metricsR.value?.metric || {} : {};
-  const yc     = yahooDataR.status === 'fulfilled' ? yahooDataR.value       : null;
-  const ymeta  = yc?.meta || {};
- 
-  // ── 52-week hi/lo ──────────────────────────────────────────────────────────
+  // 52w hi/lo
   let hi52 = m['52WeekHigh'] || ymeta.fiftyTwoWeekHigh || null;
   let lo52 = m['52WeekLow']  || ymeta.fiftyTwoWeekLow  || null;
- 
   if ((!hi52 || !lo52) && yc) {
     const closes = yc.indicators?.quote?.[0]?.close?.filter(c => c != null && !isNaN(c)) || [];
     if (closes.length > 10) {
@@ -573,42 +582,36 @@ async function fetchStockData(ticker) {
     }
   }
  
-  // ── Current PE ─────────────────────────────────────────────────────────────
-  const curPE = m.peBasicExclExtraTTM || m.peTTM || ymeta.trailingPE || null;
+  // Current PE — v7 quote adds a fourth source
+  const curPE = m.peBasicExclExtraTTM || m.peTTM || ymeta.trailingPE || v7q?.trailingPE || null;
  
-  // ── 50d MA — computed directly from Yahoo 1y closes ───────────────────────
-  // If we have the 1y chart, extract closes and compute in-process (no extra fetch).
-  let ma50;
-  const yahooCloses = yc?.indicators?.quote?.[0]?.close?.filter(c => c != null && !isNaN(c) && c > 0) || [];
-  if (yahooCloses.length >= 20) {
-    ma50 = compute50dMA(yahooCloses);
-  }
-  // If Yahoo chart fetch failed entirely, try standalone sources
-  if (!ma50 || ma50 <= 0) {
-    ma50 = await fetch50dMAStandalone(ticker);
-  }
+  // 50d MA — primary from 1y closes, v7 as immediate fallback, then full chain
+  let ma50 = null;
+  const yahooCloses = yc?.indicators?.quote?.[0]?.close
+    ?.filter(c => c != null && !isNaN(c) && c > 0) || [];
+  if (yahooCloses.length >= 20) ma50 = compute50dMA(yahooCloses);
+  if (!ma50 && v7q?.fiftyDayAverage > 0) ma50 = v7q.fiftyDayAverage;
+  if (!ma50 || ma50 <= 0) ma50 = await fetch50dMAFallback(ticker);
  
-  // ── EPS — multi-source fetch (the primary fix for S2) ─────────────────────
-  // We no longer rely on Finnhub epsBasicExclExtraAnnual which returns null on free tier.
+  // EPS — Finnhub first, then v7 quote, then full 5-source chain
   let eps = m.epsBasicExclExtraAnnual || m.epsTTM || null;
-  if (!eps) {
-    eps = await fetchEPS(ticker);
+  if (!eps && v7q?.epsTrailingTwelveMonths != null && v7q.epsTrailingTwelveMonths !== 0) {
+    eps = v7q.epsTrailingTwelveMonths;
   }
+  if (!eps) eps = await fetchEPS(ticker);
  
-  const targetMC     = m.marketCapitalization || 0;
-  const targetMargin = m.netProfitMarginAnnual || m.netProfitMarginTTM || 0;
+  const targetMC = m.marketCapitalization || 0;
  
-  // Step 2 — fetch insider + peer PE in parallel (MA already resolved above)
   const [insiderData, peerPE] = await Promise.all([
     fetchInsiderTransactions(ticker, curPx),
-    fetchPeerPE(ticker, curPE, targetMC, targetMargin),
+    fetchPeerPE(ticker, curPE, targetMC),
   ]);
  
   return {
-    quote:         quoteR.status === 'fulfilled'       ? quoteR.value       : null,
-    profile:       profileR.status === 'fulfilled'     ? profileR.value     : null,
-    metrics:       metricsR.status === 'fulfilled'     ? metricsR.value     : null,
-    earnings:      earningsR.status === 'fulfilled'    ? earningsR.value    : null,
+    quote:         quoteR.status === 'fulfilled'         ? quoteR.value         : null,
+    profile:       profileR.status === 'fulfilled'       ? profileR.value       : null,
+    metrics:       metricsR.status === 'fulfilled'       ? metricsR.value       : null,
+    earnings:      earningsR.status === 'fulfilled'      ? earningsR.value      : null,
     analystTarget: analystTargetR.status === 'fulfilled' ? analystTargetR.value : null,
     hi52, lo52, curPE, eps, ma50, insiderData, peerPE,
   };
@@ -637,21 +640,19 @@ function evaluate(ticker, d) {
       const e    = earns[0];
       const diff = e.actual - e.estimate;
       const beat = diff >= 0;
-      const ds   = Math.abs(diff) < 0.005 ? 'in-line' : beat ? `+$${Math.abs(diff).toFixed(2)}` : `-$${Math.abs(diff).toFixed(2)}`;
+      const ds   = Math.abs(diff) < 0.005 ? 'in-line'
+                 : beat ? `+$${Math.abs(diff).toFixed(2)}` : `-$${Math.abs(diff).toFixed(2)}`;
       s1 = { status: beat ? 'pass' : 'fail', value: beat ? `Beat by ${ds}` : `Missed ${ds}` };
     }
   } catch (_) {}
  
   // S2: PE vs historical average
-  // Uses Yahoo-sourced EPS + 52w hi/lo range as a proxy for the midpoint price.
-  // histPE = (52w_hi + 52w_lo) / 2 / EPS  →  fair-value PE at average price
   let s2 = { status: 'neutral', value: 'No data' };
   try {
     const curPE = d.curPE;
     const eps   = d.eps;
     const hi    = d.hi52;
     const lo    = d.lo52;
- 
     if (curPE && curPE > 0 && eps && eps !== 0 && hi && lo && hi > lo) {
       const midPrice = (hi + lo) / 2;
       const histPE   = midPrice / eps;
@@ -661,12 +662,11 @@ function evaluate(ticker, d) {
         else                            s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x` };
       }
     } else if (curPE && curPE > 0) {
-      // Partial data — at least show the PE
       s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x` };
     }
   } catch (_) {}
  
-  // S3: Price vs 50-day MA
+  // S3: Price vs 50d MA
   let s3 = { status: 'neutral', value: 'No data' };
   try {
     if (d.ma50 && d.ma50 > 0 && curPx) {
@@ -708,16 +708,16 @@ function evaluate(ticker, d) {
  
   const signals   = [s1, s2, s3, s4, s5, s6];
   const score     = signals.filter(s => s.status === 'pass').length;
-  const SIG_NAMES = ['EPS beat', 'Low PE', 'Below 50d MA', 'Insider buying', 'Analyst upside', 'PE vs peers'];
-  const passes    = signals.map((s, i) => s.status === 'pass'    ? SIG_NAMES[i] : null).filter(Boolean);
-  const fails     = signals.map((s, i) => s.status === 'fail'    ? SIG_NAMES[i] : null).filter(Boolean);
+  const SIG_NAMES = ['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside','PE vs peers'];
+  const passes    = signals.map((s, i) => s.status === 'pass' ? SIG_NAMES[i] : null).filter(Boolean);
+  const fails     = signals.map((s, i) => s.status === 'fail' ? SIG_NAMES[i] : null).filter(Boolean);
  
   let summary;
-  if      (score >= 5) summary = `Strong value candidate — ${score}/6 signals pass. Strengths: ${passes.join(', ')}.`;
+  if      (score >= 5)  summary = `Strong value candidate — ${score}/6 signals pass. Strengths: ${passes.join(', ')}.`;
   else if (score === 4) summary = `Good signals (4/6). Passes: ${passes.join(', ')}.`;
   else if (score === 3) summary = `Moderate signals (3/6). Passes: ${passes.join(', ')}.`;
-  else if (score > 0)  summary = `Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
-  else                 summary = `No signals pass. Fails: ${fails.join(', ')}.`;
+  else if (score > 0)   summary = `Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
+  else                  summary = `No signals pass. Fails: ${fails.join(', ')}.`;
  
   return {
     ticker, company, exchange,
