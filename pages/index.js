@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Head from 'next/head';
  
-// ── Presets ───────────────────────────────────────────────────────────────────
+// ── Sector presets ────────────────────────────────────────────────────────────
 const PRESETS = {
   'Mega-cap':     'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH',
   'Technology':   'AAPL,MSFT,NVDA,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT',
@@ -13,16 +13,22 @@ const PRESETS = {
   'Dividend':     'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
  
-const SIG_LABELS = ['EPS & Rev beat','PE vs hist avg','Price vs 50d MA','Insider buying','Analyst +25% upside','PE vs peers'];
+const SIG_LABELS = [
+  'EPS & Rev beat', 'PE vs hist avg', 'Price vs 50d MA',
+  'Insider buying', 'Analyst +25% upside', 'PE vs peers',
+];
  
-const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA'.split(','));
+const US_SET = new Set(
+  'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA,F,GM'
+    .split(',')
+);
  
 // ── Exact colour spec ─────────────────────────────────────────────────────────
 const C = {
   pageBg:   '#F1EFE8',
   cardBg:   '#E8E5DC',
-  deepBg:   '#3A3832',   // header + feature cards
-  darkBg:   '#5F5E56',   // active buttons, US badge bg
+  deepBg:   '#3A3832',  // header + feature cards
+  darkBg:   '#5F5E56',  // active scan button, exchange badge bg
   border:   'rgba(95,94,86,0.2)',
   borderDk: 'rgba(95,94,86,0.4)',
   tx:       '#2C2C2A',
@@ -53,19 +59,19 @@ function getRating(score) {
   return                  { label:'Ignore',    color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
-// ── Score bar dots ────────────────────────────────────────────────────────────
+// ── Score dots ────────────────────────────────────────────────────────────────
 function ScoreDots({ score, max = 6, dark = false }) {
-  const color = score >= 5 ? C.gold
-    : score >= 4 ? (dark ? '#A8C080' : C.green)
-    : score >= 3 ? (dark ? '#C8A870' : C.amber)
-    : (dark ? 'rgba(154,152,144,0.4)' : C.border);
+  const filled = dark
+    ? (score >= 5 ? C.gold : score >= 4 ? '#A8C080' : score >= 3 ? '#C8A870' : 'rgba(154,152,144,0.35)')
+    : (score >= 5 ? C.gold : score >= 4 ? C.green   : score >= 3 ? C.amber  : C.border);
+  const empty = dark ? 'rgba(95,94,86,0.4)' : C.borderDk;
   return (
     <div style={{ display:'flex', gap:4 }}>
       {Array.from({ length: max }).map((_, i) => (
         <div key={i} style={{
           width:7, height:7, borderRadius:'50%',
-          background: i < score ? color : 'transparent',
-          border: `1.5px solid ${i < score ? color : (dark ? 'rgba(95,94,86,0.4)' : C.borderDk)}`,
+          background: i < score ? filled : 'transparent',
+          border: `1.5px solid ${i < score ? filled : empty}`,
           transition: 'all 0.3s',
         }}/>
       ))}
@@ -73,23 +79,21 @@ function ScoreDots({ score, max = 6, dark = false }) {
   );
 }
  
-// ── Signal pill — light (custom scan) and dark (feature card) variants ────────
+// ── Signal pill ───────────────────────────────────────────────────────────────
 function SigPill({ sig, label, dark = false }) {
   const isPas  = sig.status === 'pass';
   const isFail = sig.status === 'fail';
- 
-  // Light variant uses spec colours; dark variant uses translucent versions on deepBg
   const bg    = dark
-    ? (isPas ? 'rgba(77,130,60,0.18)' : isFail ? 'rgba(160,70,60,0.18)' : 'rgba(160,130,40,0.15)')
-    : (isPas ? C.greenBg  : isFail ? C.redBg    : C.amberBg);
+    ? (isPas ? 'rgba(74,103,65,0.22)' : isFail ? 'rgba(122,58,48,0.22)' : 'rgba(184,144,58,0.16)')
+    : (isPas ? C.greenBg : isFail ? C.redBg : C.amberBg);
   const color = dark
-    ? (isPas ? '#A8D888'  : isFail ? '#D89888'   : '#D4B870')
-    : (isPas ? C.green    : isFail ? C.red        : C.amber);
+    ? (isPas ? '#A8D080'  : isFail ? '#D09888'  : '#D4B870')
+    : (isPas ? C.green    : isFail ? C.red       : C.amber);
   const bd    = dark
-    ? (isPas ? 'rgba(130,190,100,0.3)' : isFail ? 'rgba(200,120,100,0.3)' : 'rgba(200,170,80,0.25)')
-    : (isPas ? C.greenBd  : isFail ? C.redBd     : C.amberBd);
+    ? (isPas ? 'rgba(168,192,160,0.3)' : isFail ? 'rgba(200,160,154,0.3)' : 'rgba(212,184,112,0.25)')
+    : (isPas ? C.greenBd  : isFail ? C.redBd    : C.amberBd);
   const dot   = dark ? color : (isPas ? C.green : isFail ? C.red : C.amber);
-  const lbl   = dark ? 'rgba(154,152,144,0.7)' : C.txLight;
+  const lbl   = dark ? 'rgba(154,152,144,0.65)' : C.txLight;
  
   return (
     <div style={{ background:bg, border:`0.5px solid ${bd}`, borderRadius:5, padding:'5px 7px' }}>
@@ -106,63 +110,55 @@ function SigPill({ sig, label, dark = false }) {
   );
 }
  
-// ── Skeleton card — dark, matches FeatureCard layout exactly ─────────────────
+// ── Skeleton (dark, same bg as feature card — zero layout shift) ──────────────
 function SkeletonCard({ rank }) {
   const medals = ['I','II','III'];
-  const s = { animation:'shimmer 1.8s ease-in-out infinite', borderRadius:2 };
+  const box = (w, h, extra = {}) => (
+    <div style={{ width:w, height:h, borderRadius:2, background:'rgba(255,255,255,0.06)', animation:'shimmer 1.8s ease-in-out infinite', ...extra }}/>
+  );
   return (
-    <div style={{
-      background:C.deepBg, border:`1px solid ${C.accent}`,
-      borderTop:`3px solid rgba(184,160,112,0.35)`,
-      borderRadius:2, padding:'24px 22px', flex:1, minWidth:0,
-    }}>
+    <div style={{ background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:`3px solid rgba(184,160,112,0.35)`, borderRadius:2, padding:'24px 22px', flex:1, minWidth:0 }}>
       <div style={{ fontSize:9, color:'rgba(184,160,112,0.45)', fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:10 }}>
         Rank {medals[rank-1]}
       </div>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:14 }}>
         <div>
-          <div style={{ ...s, width:80, height:26, background:'rgba(255,255,255,0.07)', marginBottom:8 }}/>
-          <div style={{ ...s, width:160, height:11, background:'rgba(255,255,255,0.04)' }}/>
+          {box(80, 26, { marginBottom:8 })}
+          {box(160, 11)}
         </div>
-        <div style={{ ...s, width:48, height:26, background:'rgba(255,255,255,0.05)' }}/>
+        {box(48, 26)}
       </div>
-      <div style={{ ...s, width:120, height:11, background:'rgba(255,255,255,0.04)', marginBottom:16 }}/>
+      {box(120, 11, { marginBottom:16 })}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
         {[0,1,2,3,4,5].map(i => (
-          <div key={i} style={{ ...s, height:52, background:'rgba(255,255,255,0.04)', animationDelay:`${i*0.08}s` }}/>
+          <div key={i} style={{ height:52, borderRadius:4, background:'rgba(255,255,255,0.04)', animation:'shimmer 1.8s ease-in-out infinite', animationDelay:`${i*0.08}s` }}/>
         ))}
       </div>
-      <div style={{ ...s, height:38, background:'rgba(255,255,255,0.03)' }}/>
+      {box('100%', 38)}
     </div>
   );
 }
  
-// ── Feature card — dark bg (deepBg = #3A3832), matches header ────────────────
+// ── Feature card (dark background = deepBg = #3A3832, same as header) ────────
 function FeatureCard({ stock, rank }) {
   if (!stock) return <SkeletonCard rank={rank}/>;
  
-  const sc      = Math.min(stock.score || 0, 6);
-  const chgPos  = stock.change && stock.change.startsWith('+');
-  const medals  = ['I','II','III'];
- 
-  // Score colour per spec
-  const scoreColor = sc >= 5 ? C.gold
-    : sc >= 4 ? '#A8C080'
-    : sc >= 3 ? '#C8A870'
-    : 'rgba(154,152,144,0.6)';
+  const sc     = Math.min(stock.score || 0, 6);
+  const chgPos = stock.change && stock.change.startsWith('+');
+  const medals = ['I','II','III'];
+  // Score colours per exact spec
+  const scoreColor = sc >= 5 ? C.gold : sc >= 4 ? '#A8C080' : sc >= 3 ? '#C8A870' : 'rgba(154,152,144,0.5)';
  
   return (
     <div style={{
       background:C.deepBg, border:`1px solid ${C.accent}`,
-      borderTop:`3px solid ${C.gold}`,
-      borderRadius:2, padding:'24px 22px',
-      flex:1, minWidth:0, position:'relative',
+      borderTop:`3px solid ${C.gold}`, borderRadius:2,
+      padding:'24px 22px', flex:1, minWidth:0, position:'relative',
       animation:'fadeUp 0.4s ease both',
     }}>
-      {/* Header row */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16 }}>
         <div>
-          <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:7 }}>
+          <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:6 }}>
             Rank {medals[rank-1]}
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
@@ -173,16 +169,17 @@ function FeatureCard({ stock, rank }) {
               fontSize:9, fontFamily:SANS, padding:'2px 6px', borderRadius:2,
               letterSpacing:'0.08em',
               background:'rgba(184,160,112,0.15)',
-              color:C.gold, border:`0.5px solid rgba(184,160,112,0.35)`,
+              color:C.gold,
+              border:`0.5px solid rgba(184,160,112,0.2)`,
             }}>
-              {stock.exchange || 'NYSE'}
+              {stock.exchange || (US_SET.has(stock.ticker) ? 'NYSE' : 'INTL')}
             </span>
           </div>
           <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company || ''}</div>
         </div>
-        {/* Score — DM Mono, equal-width digits */}
+        {/* Score — DM Mono for consistent digit width */}
         <div style={{ textAlign:'right' }}>
-          <div style={{ fontSize:26, fontWeight:400, fontFamily:MONO, color:scoreColor, lineHeight:1, letterSpacing:'0.02em' }}>
+          <div style={{ fontSize:26, fontWeight:400, fontFamily:MONO, color:scoreColor, lineHeight:1 }}>
             {sc}<span style={{ color:'rgba(154,152,144,0.5)' }}>/6</span>
           </div>
           <div style={{ marginTop:6, display:'flex', justifyContent:'flex-end' }}>
@@ -191,30 +188,32 @@ function FeatureCard({ stock, rank }) {
         </div>
       </div>
  
-      {/* Price row */}
+      {/* Price */}
       <div style={{ marginBottom:14 }}>
-        <span style={{ fontSize:18, fontFamily:MONO, fontWeight:400, color:'#F1EFE8' }}>{stock.price||'--'}</span>
+        <span style={{ fontSize:18, fontFamily:MONO, fontWeight:400, color:'#F1EFE8' }}>{stock.price || '--'}</span>
         {stock.change && (
           <span style={{ fontSize:12, marginLeft:8, color:chgPos ? '#80C080' : C.red, fontFamily:MONO }}>
             {stock.change}
           </span>
         )}
         {stock.marketCap && (
-          <span style={{ fontSize:11, marginLeft:8, color:C.txLight, fontFamily:SANS }}>{stock.marketCap}</span>
+          <span style={{ fontSize:11, marginLeft:8, color:C.txLight, fontFamily:SANS }}>
+            {stock.marketCap}
+          </span>
         )}
       </div>
  
       {/* 6 signal pills 3×2 */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
         {SIG_LABELS.map((label, i) => {
-          const sig = (stock.signals||[])[i] || {};
+          const sig = (stock.signals || [])[i] || {};
           return <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label} dark/>;
         })}
       </div>
  
       {/* Summary */}
       <div style={{ padding:'10px 12px', background:'rgba(241,239,232,0.04)', borderRadius:2, border:`0.5px solid rgba(184,160,112,0.2)` }}>
-        <span style={{ fontSize:11, color:C.txLight, fontFamily:SANS, lineHeight:1.55 }}>
+        <span style={{ fontSize:11, color:'rgba(154,152,144,0.8)', fontFamily:SANS, lineHeight:1.55 }}>
           {stock.summary || ''}
         </span>
       </div>
@@ -227,13 +226,13 @@ function FeatureCard({ stock, rank }) {
   );
 }
  
-// ── Compact result card ───────────────────────────────────────────────────────
+// ── Compact result card (custom scan) ─────────────────────────────────────────
 function ResultCard({ stock, rank }) {
-  const sc      = Math.min(stock.score||0, 6);
-  const rating  = getRating(sc);
-  const chgPos  = stock.change && stock.change.startsWith('+');
+  const sc     = Math.min(stock.score || 0, 6);
+  const rating = getRating(sc);
+  const chgPos = stock.change && stock.change.startsWith('+');
   const scoreColor = sc >= 5 ? C.gold : sc >= 4 ? C.green : sc >= 3 ? C.amber : C.txLight;
-  const accentL = sc >= 5 ? C.gold : sc >= 4 ? C.greenBd : sc >= 3 ? C.amberBd : C.borderDk;
+  const accentL    = sc >= 5 ? C.gold : sc >= 4 ? C.greenBd : sc >= 3 ? C.amberBd : C.borderDk;
   const rnk = rank===1 ? { bg:C.gold,     color:'#2C2C2A' }
             : rank===2 ? { bg:C.accent,   color:'#F1EFE8' }
             : rank===3 ? { bg:C.accentDk, color:'#F1EFE8' }
@@ -271,18 +270,18 @@ function ResultCard({ stock, rank }) {
                 {rating.label}
               </span>
             </div>
-            <div style={{ fontSize:11, color:C.txMid, marginTop:2, fontFamily:SANS }}>{stock.company||''}</div>
+            <div style={{ fontSize:11, color:C.txMid, marginTop:2, fontFamily:SANS }}>{stock.company || ''}</div>
             {stock.price && (
               <div style={{ fontSize:11, color:C.txMid, fontFamily:MONO, marginTop:2 }}>
                 {stock.price}
-                {stock.change && <span style={{ marginLeft:6, color:chgPos ? C.green : C.red }}>{stock.change}</span>}
+                {stock.change && <span style={{ marginLeft:6, color:chgPos?C.green:C.red }}>{stock.change}</span>}
                 {stock.marketCap && <span style={{ marginLeft:6, color:C.txLight }}>{stock.marketCap}</span>}
               </div>
             )}
           </div>
         </div>
-        {/* DM Mono score */}
         <div style={{ textAlign:'right', flexShrink:0, display:'flex', flexDirection:'column', alignItems:'flex-end', gap:8 }}>
+          {/* DM Mono score */}
           <div style={{ fontSize:22, fontWeight:400, fontFamily:MONO, color:scoreColor, lineHeight:1 }}>
             {sc}<span style={{ color:C.txLight }}>/6</span>
           </div>
@@ -292,7 +291,7 @@ function ResultCard({ stock, rank }) {
  
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:4, marginBottom:8 }}>
         {SIG_LABELS.map((label, i) => {
-          const sig = (stock.signals||[])[i] || {};
+          const sig = (stock.signals || [])[i] || {};
           return <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label}/>;
         })}
       </div>
@@ -314,7 +313,7 @@ function ResultCard({ stock, rank }) {
   );
 }
  
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ── Main page ─────────────────────────────────────────────────────────────────
 export default function Home() {
   const [input, setInput]               = useState('');
   const [results, setResults]           = useState([]);
@@ -324,50 +323,60 @@ export default function Home() {
   const [updatedAt, setUpdatedAt]       = useState('');
   const [activePreset, setActivePreset] = useState('');
  
-  // Top picks — 3 null slots = 3 skeletons render immediately
+  // Top picks — 3 nulls = 3 skeletons rendered immediately at page load
   const [topPicks, setTopPicks]   = useState([null, null, null]);
-  const [topTotal, setTopTotal]   = useState(0);
-  const [topStatus, setTopStatus] = useState('Scanning watchlist…');
+  const [topStatus, setTopStatus] = useState('Scanning ~200 securities…');
  
   const timerRef   = useRef(null);
   const tickersRef = useRef([]);
  
-  // ── Top picks: two-step flow ──────────────────────────────────────────────
-  // Step 1: GET /api/top3 — returns candidates[] from Yahoo broad scan
-  // Step 2: POST /api/analyse with those candidates — returns full signal data
-  // Skeletons show from render; cards fill in after step 2 completes (~10-14s)
+  // ── Top picks: two-step, browser-side ──────────────────────────────────────
+  // Step 1: GET /api/top3 → Yahoo scan → candidates[]
+  // Step 2: POST /api/analyse → full 6-signal data → sort → fill cards
+  //
+  // Why browser-side and NOT server-to-server:
+  // Vercel free tier kills internal fetch() calls between serverless functions.
+  // The browser calling both endpoints directly always works.
   useEffect(() => {
     let live = true;
  
     (async () => {
       try {
-        // Step 1 — broad scan
-        setTopStatus('Scanning ~200 securities…');
+        // Step 1 — broad Yahoo scan (fast, no API key, ~4s)
         const scanRes = await fetch('/api/top3');
-        if (!live || !scanRes.ok) return;
+        if (!live || !scanRes.ok) {
+          if (live) setTopStatus('Could not load top picks');
+          return;
+        }
         const { candidates, totalScanned } = await scanRes.json();
-        if (!live || !candidates?.length) return;
+        if (!live || !Array.isArray(candidates) || candidates.length === 0) {
+          if (live) setTopStatus('No candidates found');
+          return;
+        }
  
-        if (totalScanned) setTopTotal(totalScanned);
-        setTopStatus(`Analysing top ${candidates.length} candidates…`);
+        setTopStatus(`Analysing top ${candidates.length} picks…`);
  
-        // Step 2 — full signal analysis
+        // Step 2 — full signal analysis on candidates (~8-12s)
         const analyseRes = await fetch('/api/analyse', {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tickers: candidates }),
+          body:    JSON.stringify({ tickers: candidates }),
         });
-        if (!live || !analyseRes.ok) return;
+        if (!live || !analyseRes.ok) {
+          if (live) setTopStatus('Analysis failed');
+          return;
+        }
+ 
         const { results: res } = await analyseRes.json();
         if (!live) return;
  
         const sorted = Object.values(res || {})
           .filter(s => s && !s.error && s.score != null)
-          .sort((a, b) => (b.score||0) - (a.score||0));
+          .sort((a, b) => (b.score || 0) - (a.score || 0));
  
-        setTopPicks([sorted[0]||null, sorted[1]||null, sorted[2]||null]);
+        setTopPicks([sorted[0] || null, sorted[1] || null, sorted[2] || null]);
         setTopStatus(`${totalScanned || candidates.length} securities screened`);
-      } catch (e) {
+      } catch (_) {
         if (live) setTopStatus('Could not load top picks');
       }
     })();
@@ -381,13 +390,18 @@ export default function Home() {
     setStatus(`Analysing ${tickers.length} securities…`);
     try {
       const res = await fetch('/api/analyse', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ tickers }),
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ tickers }),
       });
-      if (!res.ok) { const e = await res.json(); throw new Error(e.error||`HTTP ${res.status}`); }
+      if (!res.ok) {
+        const e = await res.json();
+        throw new Error(e.error || `HTTP ${res.status}`);
+      }
       const data = await res.json();
-      const arr = Object.values(data.results).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
+      const arr  = Object.values(data.results)
+        .filter(Boolean)
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
       setResults(arr);
       setUpdatedAt(new Date().toLocaleTimeString());
       setStatus('');
@@ -399,23 +413,23 @@ export default function Home() {
   }, []);
  
   function runScan() {
-    const tickers = input.split(/[\s,;]+/).map(t=>t.toUpperCase().trim()).filter(Boolean).slice(0,20);
+    const tickers = input.split(/[\s,;]+/).map(t => t.toUpperCase().trim()).filter(Boolean).slice(0, 20);
     if (!tickers.length) return;
     tickersRef.current = tickers;
     clearInterval(timerRef.current);
     setResults([]);
     scan(tickers);
-    timerRef.current = setInterval(()=>scan(tickersRef.current), 5*60*1000);
+    timerRef.current = setInterval(() => scan(tickersRef.current), 5 * 60 * 1000);
   }
  
-  useEffect(()=>()=>clearInterval(timerRef.current), []);
+  useEffect(() => () => clearInterval(timerRef.current), []);
  
   const filtered = results.filter(r => {
-    if (filter==='strong') return (r.score||0) >= 5;
-    if (filter==='mod')    return (r.score||0)===3||(r.score||0)===4;
-    if (filter==='weak')   return (r.score||0) <= 2;
-    if (filter==='us')     return US_SET.has(r.ticker);
-    if (filter==='intl')   return !US_SET.has(r.ticker);
+    if (filter === 'strong') return (r.score || 0) >= 5;
+    if (filter === 'mod')    return (r.score || 0) === 3 || (r.score || 0) === 4;
+    if (filter === 'weak')   return (r.score || 0) <= 2;
+    if (filter === 'us')     return US_SET.has(r.ticker);
+    if (filter === 'intl')   return !US_SET.has(r.ticker);
     return true;
   });
  
@@ -445,7 +459,7 @@ export default function Home() {
       <div style={{ background:C.pageBg, minHeight:'100vh', color:C.tx, fontFamily:SANS }}>
  
         {/* Header */}
-        <div style={{ background:C.deepBg, borderBottom:`1px solid rgba(184,160,112,0.2)`, padding:'0 32px' }}>
+        <div style={{ background:C.deepBg, borderBottom:`1px solid rgba(184,160,112,0.3)`, padding:'0 32px' }}>
           <div style={{ maxWidth:1200, margin:'0 auto', display:'flex', alignItems:'center', justifyContent:'space-between', height:64 }}>
             <div style={{ display:'flex', alignItems:'center', gap:16 }}>
               <div style={{ width:32, height:32, border:`1px solid ${C.gold}`, display:'flex', alignItems:'center', justifyContent:'center' }}>
@@ -460,7 +474,7 @@ export default function Home() {
             </div>
             <div style={{ textAlign:'right', fontSize:10, color:C.txLight, fontFamily:MONO, lineHeight:1.8 }}>
               <div style={{ display:'flex', alignItems:'center', gap:6, justifyContent:'flex-end' }}>
-                <div style={{ width:6, height:6, borderRadius:'50%', background:scanning ? C.gold : results.length ? C.gold : C.txLight }}/>
+                <div style={{ width:6, height:6, borderRadius:'50%', background: scanning ? C.gold : results.length ? C.gold : C.txLight }}/>
                 <span style={{ color:'#F1EFE8' }}>{scanning ? 'Scanning…' : results.length ? 'Live' : 'Ready'}</span>
               </div>
               {updatedAt && <div>Updated {updatedAt}</div>}
@@ -470,10 +484,12 @@ export default function Home() {
  
         <div style={{ maxWidth:1200, margin:'0 auto', padding:'32px 32px 80px' }}>
  
-          {/* Top Picks */}
+          {/* Top Picks section */}
           <div style={{ marginBottom:40 }}>
             <div style={{ display:'flex', alignItems:'baseline', gap:16, marginBottom:20 }}>
-              <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>Top Picks Today</h2>
+              <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>
+                Top Picks Today
+              </h2>
               <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
               <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>
                 {topStatus}
@@ -494,34 +510,44 @@ export default function Home() {
             <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
           </div>
  
-          <div style={{ background:C.cardBg, border:`0.5px solid ${C.borderDk}`, padding:'20px', marginBottom:20 }}>
+          <div style={{ background:C.cardBg, border:`0.5px solid ${C.borderDk}`, padding:'20px 20px', marginBottom:20 }}>
             <div style={{ display:'flex', gap:10, marginBottom:14 }}>
               <input type="text" value={input}
-                onChange={e=>setInput(e.target.value)}
-                onKeyDown={e=>e.key==='Enter'&&runScan()}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => e.key==='Enter' && runScan()}
                 placeholder="Enter ticker symbols: AAPL, MSFT, NVDA, TSM…"
                 style={{ flex:1, background:C.pageBg, border:`0.5px solid ${C.borderDk}`, padding:'10px 14px', fontSize:13, fontFamily:MONO, color:C.tx, borderRadius:0 }}
               />
               <button onClick={runScan} disabled={scanning} style={{ padding:'10px 24px', background:C.darkBg, color:'#F1EFE8', border:'none', fontSize:12, fontFamily:SANS, fontWeight:500, letterSpacing:'0.1em', textTransform:'uppercase' }}>
                 {scanning ? 'Scanning…' : 'Scan'}
               </button>
-              {results.length > 0 && <>
-                <button onClick={()=>scan(tickersRef.current)} disabled={scanning} style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS }}>Refresh</button>
-                <button onClick={()=>{ setResults([]); tickersRef.current=[]; setUpdatedAt(''); }} style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS }}>Clear</button>
-              </>}
+              {results.length > 0 && (
+                <button onClick={() => scan(tickersRef.current)} disabled={scanning}
+                  style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS }}>
+                  Refresh
+                </button>
+              )}
+              {results.length > 0 && (
+                <button onClick={() => { setResults([]); tickersRef.current=[]; setUpdatedAt(''); }}
+                  style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS }}>
+                  Clear
+                </button>
+              )}
             </div>
             <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
               <span style={{ fontSize:9, color:C.txLight, fontFamily:SANS, letterSpacing:'0.12em', textTransform:'uppercase', marginRight:4 }}>Sectors</span>
               {Object.keys(PRESETS).map(name => {
                 const active = activePreset === name;
                 return (
-                  <button key={name} onClick={()=>{ setInput(PRESETS[name]); setActivePreset(name); }} style={{
+                  <button key={name} onClick={() => { setInput(PRESETS[name]); setActivePreset(name); }} style={{
                     padding:'4px 12px', fontSize:10, fontFamily:SANS, letterSpacing:'0.06em',
                     background: active ? C.darkBg : 'transparent',
                     color: active ? '#F1EFE8' : C.txMid,
-                    border:`0.5px solid ${active ? C.darkBg : C.borderDk}`,
+                    border: `0.5px solid ${active ? C.darkBg : C.borderDk}`,
                     borderRadius:0, whiteSpace:'nowrap',
-                  }}>{name}</button>
+                  }}>
+                    {name}
+                  </button>
                 );
               })}
             </div>
@@ -533,17 +559,17 @@ export default function Home() {
             {[['all','All'],['strong','Strong 5–6'],['mod','Moderate 3–4'],['weak','Weak 0–2'],['us','US'],['intl','International']].map(([k,l]) => {
               const active = filter === k;
               return (
-                <button key={k} onClick={()=>setFilter(k)} style={{
+                <button key={k} onClick={() => setFilter(k)} style={{
                   padding:'4px 12px', fontSize:10, fontFamily:SANS, letterSpacing:'0.06em',
                   background: active ? C.accentDk : 'transparent',
                   color: active ? '#F1EFE8' : C.txMid,
-                  border:`0.5px solid ${active ? C.accentDk : C.borderDk}`, borderRadius:0,
+                  border: `0.5px solid ${active ? C.accentDk : C.borderDk}`, borderRadius:0,
                 }}>{l}</button>
               );
             })}
           </div>
  
-          {/* Scanning indicator */}
+          {/* Status */}
           {scanning && (
             <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:11, color:C.txMid, fontFamily:MONO, marginBottom:12 }}>
               <div style={{ width:11, height:11, border:`1.5px solid ${C.border}`, borderTopColor:C.gold, borderRadius:'50%', flexShrink:0, animation:'spin 0.7s linear infinite' }}/>
@@ -571,17 +597,30 @@ export default function Home() {
               <span style={{ fontSize:10, color:C.txLight, fontFamily:MONO, flex:1, letterSpacing:'0.06em' }}>
                 {filtered.length} securities ready to export
               </span>
-              <button onClick={()=>{
-                const hdr=['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS','PE_hist','vs50dMA','Insider','Analyst','PE_peers','Summary'];
-                const rows=filtered.map((r,i)=>{const g=r.signals||[];return[i+1,r.ticker,`"${(r.company||'').replace(/"/g,'""')}"`,r.score||0,r.price||'',r.change||'',r.marketCap||'',g[0]?.value||'',g[1]?.value||'',g[2]?.value||'',g[3]?.value||'',g[4]?.value||'',g[5]?.value||'',`"${(r.summary||'').replace(/"/g,'""')}"`].join(',');});
-                const blob=new Blob([[hdr.join(',')].concat(rows).join('\n')],{type:'text/csv'});
-                const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`signals_${new Date().toISOString().slice(0,10)}.csv`;a.click();
+              <button onClick={() => {
+                const hdr = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS','PE_hist','vs50dMA','Insider','Analyst','PE_peers','Summary'];
+                const rows = filtered.map((r, i) => {
+                  const g = r.signals || [];
+                  return [i+1, r.ticker, `"${(r.company||'').replace(/"/g,'""')}"`, r.score||0,
+                    r.price||'', r.change||'', r.marketCap||'',
+                    g[0]?.value||'', g[1]?.value||'', g[2]?.value||'',
+                    g[3]?.value||'', g[4]?.value||'', g[5]?.value||'',
+                    `"${(r.summary||'').replace(/"/g,'""')}"`].join(',');
+                });
+                const blob = new Blob([[hdr.join(',')].concat(rows).join('\n')], { type:'text/csv' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `signals_${new Date().toISOString().slice(0,10)}.csv`;
+                a.click();
               }} style={{ padding:'8px 18px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:11, fontFamily:SANS, letterSpacing:'0.06em' }}>
                 Export CSV
               </button>
-              <button onClick={()=>{
-                const blob=new Blob([JSON.stringify(filtered.map((r,i)=>({rank:i+1,...r})),null,2)],{type:'application/json'});
-                const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`signals_${new Date().toISOString().slice(0,10)}.json`;a.click();
+              <button onClick={() => {
+                const blob = new Blob([JSON.stringify(filtered.map((r,i) => ({rank:i+1,...r})), null, 2)], { type:'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `signals_${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
               }} style={{ padding:'8px 18px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:11, fontFamily:SANS, letterSpacing:'0.06em' }}>
                 Export JSON
               </button>
