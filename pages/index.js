@@ -272,14 +272,26 @@ export default function Home() {
       try {
         const sr = await fetch('/api/top3');
         if (!live||!sr.ok) { if(live) setTopStatus('Could not load top picks'); return; }
-        const { candidates, totalScanned } = await sr.json();
+        const { candidates, totalScanned, stockMeta = {} } = await sr.json();
         if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
         setTopStatus(`Analysing top ${candidates.length} picks…`);
         const ar = await fetch('/api/analyse', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers:candidates}) });
         if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
         const { results:res } = await ar.json();
         if (!live) return;
-        const sorted = Object.values(res||{}).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0));
+        // Merge exchange from stockMeta into each result — analyse.js gets it from
+        // Finnhub profile2, but stockMeta from top3 is a reliable second source.
+        // Whichever is truthy wins; this fixes the "NEW" badge for all cases.
+        const merged = Object.fromEntries(
+          Object.entries(res||{}).map(([ticker, stock]) => {
+            if (!stock) return [ticker, stock];
+            const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
+              ? stock.exchange
+              : (stockMeta[ticker]?.exchange || stock.exchange);
+            return [ticker, { ...stock, exchange }];
+          })
+        );
+        const sorted = Object.values(merged).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0));
         setTopPicks([sorted[0]||null, sorted[1]||null, sorted[2]||null]);
         setTopStatus(`${totalScanned||candidates.length} securities screened`);
       } catch(_) { if(live) setTopStatus('Could not load top picks'); }
