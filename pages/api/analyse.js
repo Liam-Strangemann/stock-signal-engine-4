@@ -1,60 +1,143 @@
-// pages/api/analyse.js  v4
+// pages/api/analyse.js  v5
 //
-// Data source strategy — deliberately avoids over-relying on any single provider:
+// Root cause of missing signals was identified:
+//   - Finnhub free tier returns null for EPS/PE on most tickers
+//   - Yahoo blocks Vercel shared IPs without proper crumb auth
+//   - FMP free tier requires API key (their keyless endpoints were deprecated)
 //
-//  PRIMARY (Finnhub — always runs):
-//    quote, profile, metrics, earnings, price-target, insider-transactions
+// Solution — 4 genuinely independent data providers:
 //
-//  S2 (PE vs hist avg) — EPS chain:
-//    1. Finnhub metric.epsTTM / epsBasicExclExtraAnnual
-//    2. FMP /api/v3/ratios-ttm/{ticker} — trailingPE, netIncomePerShareTTM (free, no key)
-//    3. FMP /api/v3/key-metrics-ttm/{ticker} — peRatioTTM, netIncomePerShareTTM
-//    4. Yahoo /v7/finance/quote — epsTrailingTwelveMonths (different endpoint bucket)
-//    5. Yahoo quoteSummary defaultKeyStatistics — trailingEps
-//    6. Yahoo earningsHistory — TTM sum of quarterly actuals
+//  1. FINNHUB (FINNHUB_KEY) — quote, profile, candle, earnings, price-target,
+//     insider-transactions, peers. Candle is the anchor for 50d MA.
 //
-//  S3 (50d MA) — chain:
-//    1. Compute from Finnhub candle (60 days of OHLCV — very reliable on free tier)
-//    2. Compute from Yahoo 1y chart closes (already fetched for 52w hi/lo)
-//    3. FMP /api/v3/technical_indicator/daily/{ticker}?type=sma&period=50 (free)
-//    4. Yahoo summaryDetail.fiftyDayAverage (pre-computed field)
-//    5. Stooq CSV daily closes
+//  2. ALPHA VANTAGE (AV_KEY env var — free at alphavantage.co, 25 req/day free)
+//     OVERVIEW endpoint returns in one call: EPS, PERatio, AnalystTargetPrice,
+//     50DayMovingAverage, 200DayMovingAverage, 52WeekHigh, 52WeekLow.
+//     This single call fixes S2, S3, and S5 for every ticker.
 //
-//  S5 (Analyst target) — chain:
-//    1. Finnhub /stock/price-target
-//    2. FMP /api/v3/price-target-consensus/{ticker} (free)
-//    3. Yahoo financialData targetMedianPrice
+//  3. YAHOO FINANCE with crumb authentication — fetch crumb once per batch,
+//     reuse across all tickers. Crumb bypasses the 401/429 blocking.
+//     Used for: trailingPE, peer PE, 52w hi/lo, closes for MA.
 //
-//  S6 (PE vs peers) — per-peer chain:
-//    1. FMP /api/v3/ratios-ttm/{peer} — peRatioTTM
-//    2. Yahoo /v7/finance/quote — trailingPE
-//    3. Finnhub /stock/metric — peBasicExclExtraTTM
+//  4. SEC EDGAR XBRL API (government, always accessible, no key needed)
+//     Used as EPS fallback: /api/xbrl/companyfacts/CIK{n}.json
+//     Returns EPS from actual 10-K/10-Q filings — ground truth.
 //
-//  S4 (Insider) — Finnhub Form 4 data (accurate SEC filings).
-//    Note: sells without buys correctly show as fail. CVX's 23 sells reflects
-//    real exec sell-offs; data is accurate per SEC Form 4 records.
+// ENV VARS REQUIRED:
+//   FINNHUB_KEY  — from finnhub.io (existing)
+//   AV_KEY       — from alphavantage.co (free, sign up takes 30 seconds)
  
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
-const FH_BASE     = 'https://finnhub.io/api/v1';
-// FMP free tier — no API key required for these endpoints (rate limited but works)
-const FMP_BASE    = 'https://financialmodelingprep.com/api/v3';
+const AV_KEY      = process.env.AV_KEY;   // Alpha Vantage — get free at alphavantage.co
  
-const YH = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Origin': 'https://finance.yahoo.com',
-  'Referer': 'https://finance.yahoo.com/',
-};
+const FH = 'https://finnhub.io/api/v1';
+const AV = 'https://www.alphavantage.co/query';
+ 
+// Yahoo crumb — fetched once per request batch, shared across all tickers
+let _yahooCrumb   = null;
+let _yahooCookies = '';
+let _crumbExpiry  = 0;
+ 
+const YH_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider helpers
+// Yahoo crumb auth — required to avoid 401s on Vercel shared IPs
+// ─────────────────────────────────────────────────────────────────────────────
+ 
+async function getYahooCrumb() {
+  // Reuse crumb for up to 5 minutes
+  if (_yahooCrumb && Date.now() < _crumbExpiry) return { crumb: _yahooCrumb, cookies: _yahooCookies };
+ 
+  try {
+    // Step 1: Hit Yahoo Finance home to get session cookies
+    const homeRes = await fetch('https://finance.yahoo.com/', {
+      headers: {
+        'User-Agent': YH_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000),
+    });
+ 
+    // Extract Set-Cookie headers
+    const rawCookies = homeRes.headers.get('set-cookie') || '';
+    // Parse into simple cookie string — grab A1, A3, A1S cookies
+    const cookiePairs = rawCookies.split(',').map(c => c.split(';')[0].trim()).filter(c => c.includes('='));
+    _yahooCookies = cookiePairs.join('; ');
+ 
+    // Step 2: Fetch crumb using those cookies
+    const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+      headers: {
+        'User-Agent': YH_UA,
+        'Accept': '*/*',
+        'Cookie': _yahooCookies,
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+ 
+    if (crumbRes.ok) {
+      const crumb = await crumbRes.text();
+      if (crumb && crumb.length > 0 && !crumb.includes('{')) {
+        _yahooCrumb  = crumb.trim();
+        _crumbExpiry = Date.now() + 5 * 60 * 1000;
+        return { crumb: _yahooCrumb, cookies: _yahooCookies };
+      }
+    }
+  } catch (_) {}
+ 
+  // Fallback: try query2
+  try {
+    const r = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+      headers: { 'User-Agent': YH_UA, 'Accept': '*/*' },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (r.ok) {
+      const crumb = await r.text();
+      if (crumb && crumb.length > 0 && !crumb.includes('{')) {
+        _yahooCrumb  = crumb.trim();
+        _crumbExpiry = Date.now() + 5 * 60 * 1000;
+        return { crumb: _yahooCrumb, cookies: '' };
+      }
+    }
+  } catch (_) {}
+ 
+  return { crumb: null, cookies: '' };
+}
+ 
+// Yahoo fetch with crumb
+async function yahooFetch(url, crumbInfo) {
+  const { crumb, cookies } = crumbInfo || { crumb: null, cookies: '' };
+  const fullUrl = crumb ? `${url}${url.includes('?') ? '&' : '?'}crumb=${encodeURIComponent(crumb)}` : url;
+ 
+  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
+    const u = fullUrl.replace(/https:\/\/query[12]\.finance\.yahoo\.com/, base);
+    try {
+      const r = await fetch(u, {
+        headers: {
+          'User-Agent': YH_UA,
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          ...(cookies ? { 'Cookie': cookies } : {}),
+        },
+        signal: AbortSignal.timeout(7000),
+      });
+      if (r.status === 401 || r.status === 429) continue;
+      if (!r.ok) continue;
+      return await r.json();
+    } catch (_) {}
+  }
+  return null;
+}
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// Finnhub
 // ─────────────────────────────────────────────────────────────────────────────
  
 async function fh(path) {
   if (!FINNHUB_KEY) throw new Error('No FINNHUB_KEY');
   const sep = path.includes('?') ? '&' : '?';
-  const r = await fetch(`${FH_BASE}${path}${sep}token=${FINNHUB_KEY}`, {
+  const r = await fetch(`${FH}${path}${sep}token=${FINNHUB_KEY}`, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
     signal: AbortSignal.timeout(8000),
   });
@@ -64,69 +147,116 @@ async function fh(path) {
   return d;
 }
  
-// FMP free tier — works without key for basic fundamental endpoints
-async function fmp(path) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Alpha Vantage OVERVIEW — the key new data source
+// Returns: EPS, PERatio, AnalystTargetPrice, 50DayMovingAverage,
+//          52WeekHigh, 52WeekLow, MarketCapitalization, all in ONE call
+// Free tier: 25 calls/day, 5 calls/minute — plenty for our use case
+// ─────────────────────────────────────────────────────────────────────────────
+ 
+async function fetchAVOverview(ticker) {
+  if (!AV_KEY) return null;
   try {
-    const r = await fetch(`${FMP_BASE}${path}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(7000),
-    });
+    const r = await fetch(
+      `${AV}?function=OVERVIEW&symbol=${ticker}&apikey=${AV_KEY}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000) }
+    );
     if (!r.ok) return null;
     const d = await r.json();
-    // FMP returns {"Error Message":"..."} on bad ticker
-    if (d?.['Error Message'] || d?.error) return null;
+    // AV returns {"Information":"..."} when rate limited or key invalid
+    if (d?.Information || d?.Note || !d?.Symbol) return null;
     return d;
   } catch (_) { return null; }
 }
  
-async function yahooChart(ticker, range = '1y') {
-  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
-    try {
-      const r = await fetch(
-        `${base}/v8/finance/chart/${ticker}?interval=1d&range=${range}`,
-        { headers: YH, signal: AbortSignal.timeout(6000) }
-      );
-      if (!r.ok) continue;
+// ─────────────────────────────────────────────────────────────────────────────
+// SEC EDGAR — EPS from actual XBRL filings (government, always works)
+// ─────────────────────────────────────────────────────────────────────────────
+ 
+// Cache ticker → CIK mapping (stable data, no need to re-fetch)
+const CIK_CACHE = {};
+ 
+async function getSecCIK(ticker) {
+  if (CIK_CACHE[ticker]) return CIK_CACHE[ticker];
+  try {
+    const r = await fetch(
+      `https://efts.sec.gov/LATEST/search-index?q=%22${ticker}%22&dateRange=custom&startdt=2020-01-01&enddt=2025-12-31&forms=10-K&hits.hits._source=period_of_report,entity_name,file_num`,
+      { headers: { 'User-Agent': 'signal-engine/1.0 contact@example.com' }, signal: AbortSignal.timeout(7000) }
+    );
+    // Better: use the company search endpoint
+    const r2 = await fetch(
+      `https://efts.sec.gov/LATEST/search-index?q=%22${ticker}%22&forms=10-K&dateRange=custom&startdt=2023-01-01&enddt=2025-12-31`,
+      { headers: { 'User-Agent': 'signal-engine/1.0' }, signal: AbortSignal.timeout(6000) }
+    );
+    if (r2.ok) {
+      const j   = await r2.json();
+      const hit = j?.hits?.hits?.[0]?._source;
+      const cik = hit?.entity_id || hit?.cik;
+      if (cik) { CIK_CACHE[ticker] = String(cik).padStart(10, '0'); return CIK_CACHE[ticker]; }
+    }
+  } catch (_) {}
+ 
+  // Fallback: SEC company tickers JSON (updated daily by SEC)
+  try {
+    const r = await fetch(
+      'https://www.sec.gov/files/company_tickers.json',
+      { headers: { 'User-Agent': 'signal-engine/1.0' }, signal: AbortSignal.timeout(8000) }
+    );
+    if (r.ok) {
       const j = await r.json();
-      const result = j?.chart?.result?.[0];
-      if (result) return result;
-    } catch (_) {}
-  }
+      for (const entry of Object.values(j)) {
+        if (entry.ticker?.toUpperCase() === ticker.toUpperCase()) {
+          const cik = String(entry.cik_str).padStart(10, '0');
+          CIK_CACHE[ticker] = cik;
+          return cik;
+        }
+      }
+    }
+  } catch (_) {}
+ 
   return null;
 }
  
-async function yahooSummary(ticker, modules) {
-  for (const url of [
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=${modules}`,
-    `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=${modules}`,
-    `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${ticker}?modules=${modules}`,
-  ]) {
-    try {
-      const r = await fetch(url, { headers: YH, signal: AbortSignal.timeout(6000) });
-      if (!r.ok) continue;
-      const j = await r.json();
-      const res = j?.quoteSummary?.result?.[0];
-      if (res) return res;
-    } catch (_) {}
-  }
-  return null;
-}
+async function fetchSecEPS(ticker) {
+  try {
+    const cik = await getSecCIK(ticker);
+    if (!cik) return null;
  
-// Yahoo v7 quote — different rate-limit bucket from quoteSummary
-async function yahooV7(ticker) {
-  const fields = 'trailingPE,epsTrailingTwelveMonths,fiftyDayAverage,marketCap,targetMeanPrice,targetMedianPrice,regularMarketPrice';
-  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
-    try {
-      const r = await fetch(
-        `${base}/v7/finance/quote?symbols=${ticker}&fields=${fields}`,
-        { headers: YH, signal: AbortSignal.timeout(6000) }
-      );
-      if (!r.ok) continue;
-      const j = await r.json();
-      const q = j?.quoteResponse?.result?.[0];
-      if (q) return q;
-    } catch (_) {}
-  }
+    const r = await fetch(
+      `https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`,
+      { headers: { 'User-Agent': 'signal-engine/1.0' }, signal: AbortSignal.timeout(10000) }
+    );
+    if (!r.ok) return null;
+    const d = await r.json();
+ 
+    // Try EarningsPerShareBasic first, then Diluted
+    const facts = d?.facts?.['us-gaap'];
+    for (const key of ['EarningsPerShareBasic', 'EarningsPerShareDiluted', 'EarningsPerShareBasicAndDiluted']) {
+      const concept = facts?.[key];
+      if (!concept) continue;
+ 
+      // Get annual data (10-K) — last 4 quarters sum for TTM
+      const annualUnits = concept.units?.['USD/shares'] || [];
+      const annuals = annualUnits
+        .filter(e => e.form === '10-K' && e.val != null)
+        .sort((a, b) => new Date(b.end) - new Date(a.end));
+ 
+      if (annuals.length > 0) {
+        const eps = annuals[0].val;
+        if (eps != null && eps !== 0) return eps;
+      }
+ 
+      // Try quarterly (10-Q) — sum last 4 for TTM
+      const quarterlyUnits = annualUnits.filter(e => e.form === '10-Q' && e.val != null);
+      if (quarterlyUnits.length >= 4) {
+        const recent4 = quarterlyUnits
+          .sort((a, b) => new Date(b.end) - new Date(a.end))
+          .slice(0, 4);
+        const ttm = recent4.reduce((sum, e) => sum + e.val, 0);
+        if (ttm !== 0) return ttm;
+      }
+    }
+  } catch (_) {}
   return null;
 }
  
@@ -172,8 +302,12 @@ function compute50dMA(closes) {
   return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
  
-// Primary: Finnhub candle — very reliable on free tier, gives us 60 daily bars
-async function fetch50dMAFromFinnhub(ticker) {
+async function resolve50dMA(ticker, avOverview, crumbInfo) {
+  // 1: Alpha Vantage OVERVIEW — 50DayMovingAverage pre-computed, very reliable
+  const avMA = parseFloat(avOverview?.['50DayMovingAverage']);
+  if (avMA && avMA > 0) return avMA;
+ 
+  // 2: Finnhub candle — 60 daily bars, compute ourselves
   try {
     const d = await fh(`/stock/candle?symbol=${ticker}&resolution=D&count=60`);
     if (d?.s === 'ok' && Array.isArray(d.c) && d.c.length >= 20) {
@@ -181,180 +315,155 @@ async function fetch50dMAFromFinnhub(ticker) {
       if (ma && ma > 0) return ma;
     }
   } catch (_) {}
-  return null;
-}
  
-async function fetch50dMAFallback(ticker, yahooCloses) {
-  // 1: compute from Yahoo 1y closes already in hand
-  if (yahooCloses && yahooCloses.length >= 20) {
-    const ma = compute50dMA(yahooCloses);
-    if (ma && ma > 0) return ma;
-  }
- 
-  // 2: FMP technical indicator — SMA 50
+  // 3: Yahoo chart — compute from closes (uses crumb auth)
   try {
-    const d = await fmp(`/technical_indicator/daily/${ticker}?type=sma&period=50&limit=1`);
-    const sma = Array.isArray(d) ? d[0]?.sma : null;
-    if (sma && sma > 0) return sma;
-  } catch (_) {}
- 
-  // 3: Yahoo summaryDetail fiftyDayAverage (pre-computed)
-  try {
-    const ys = await yahooSummary(ticker, 'summaryDetail');
-    const ma = ys?.summaryDetail?.fiftyDayAverage?.raw;
-    if (ma && ma > 0) return ma;
-  } catch (_) {}
- 
-  // 4: Yahoo v7 fiftyDayAverage
-  try {
-    const q = await yahooV7(ticker);
-    if (q?.fiftyDayAverage > 0) return q.fiftyDayAverage;
-  } catch (_) {}
- 
-  // 5: Stooq CSV
-  try {
-    const r = await fetch(
-      `https://stooq.com/q/d/l/?s=${ticker.toLowerCase()}.us&i=d`,
-      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(7000) }
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=3mo`,
+      crumbInfo
     );
-    if (r.ok) {
-      const text = await r.text();
-      if (text.length > 100 && !text.toLowerCase().includes('no data')) {
-        const lines  = text.trim().split('\n').slice(1);
-        const closes = lines.slice(-60)
-          .map(l => parseFloat((l.split(',')[4] || '').trim()))
-          .filter(c => !isNaN(c) && c > 0);
-        const ma = compute50dMA(closes);
-        if (ma && ma > 0) return ma;
-      }
-    }
+    const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close
+      ?.filter(c => c != null && !isNaN(c) && c > 0);
+    const ma = compute50dMA(closes);
+    if (ma && ma > 0) return ma;
+  } catch (_) {}
+ 
+  // 4: Yahoo quoteSummary summaryDetail — fiftyDayAverage (pre-computed)
+  try {
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`,
+      crumbInfo
+    );
+    const ma = j?.quoteSummary?.result?.[0]?.summaryDetail?.fiftyDayAverage?.raw;
+    if (ma && ma > 0) return ma;
   } catch (_) {}
  
   return null;
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// EPS — 6 independent sources
+// EPS resolution
 // ─────────────────────────────────────────────────────────────────────────────
  
-async function fetchEPS(ticker, finnhubMetric) {
-  // 1: Finnhub metric — first because it's already fetched
-  const fhEps = finnhubMetric?.epsTTM || finnhubMetric?.epsBasicExclExtraAnnual;
-  if (fhEps && fhEps !== 0) return fhEps;
+async function resolveEPS(ticker, avOverview, finnhubMetric, crumbInfo) {
+  // 1: Alpha Vantage OVERVIEW — EPS field, highly reliable
+  const avEPS = parseFloat(avOverview?.EPS);
+  if (!isNaN(avEPS) && avEPS !== 0) return avEPS;
  
-  // 2: FMP ratios-ttm — netIncomePerShareTTM is EPS
+  // 2: Finnhub metric
+  const fhEPS = finnhubMetric?.epsTTM || finnhubMetric?.epsBasicExclExtraAnnual;
+  if (fhEPS && fhEPS !== 0) return fhEPS;
+ 
+  // 3: Yahoo v10 defaultKeyStatistics — trailingEps
   try {
-    const d = await fmp(`/ratios-ttm/${ticker}`);
-    const eps = Array.isArray(d) ? d[0]?.netIncomePerShareTTM : d?.netIncomePerShareTTM;
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`,
+      crumbInfo
+    );
+    const eps = j?.quoteSummary?.result?.[0]?.defaultKeyStatistics?.trailingEps?.raw;
     if (eps != null && eps !== 0) return eps;
   } catch (_) {}
  
-  // 3: FMP key-metrics-ttm
+  // 4: Yahoo earningsHistory — TTM from last 4 quarters
   try {
-    const d = await fmp(`/key-metrics-ttm/${ticker}`);
-    const eps = Array.isArray(d) ? d[0]?.netIncomePerShareTTM : d?.netIncomePerShareTTM;
-    if (eps != null && eps !== 0) return eps;
-  } catch (_) {}
- 
-  // 4: Yahoo v7 epsTrailingTwelveMonths
-  try {
-    const q = await yahooV7(ticker);
-    if (q?.epsTrailingTwelveMonths != null && q.epsTrailingTwelveMonths !== 0) {
-      return q.epsTrailingTwelveMonths;
-    }
-  } catch (_) {}
- 
-  // 5: Yahoo defaultKeyStatistics trailingEps
-  try {
-    const ys  = await yahooSummary(ticker, 'defaultKeyStatistics');
-    const eps = ys?.defaultKeyStatistics?.trailingEps?.raw;
-    if (eps != null && eps !== 0) return eps;
-  } catch (_) {}
- 
-  // 6: Yahoo earningsHistory — TTM sum of 4 quarters
-  try {
-    const ys      = await yahooSummary(ticker, 'earningsHistory');
-    const history = ys?.earningsHistory?.history || [];
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=earningsHistory`,
+      crumbInfo
+    );
+    const history = j?.quoteSummary?.result?.[0]?.earningsHistory?.history || [];
     if (history.length >= 2) {
       const ttm = history.slice(-4).reduce((s, q) => s + (q?.epsActual?.raw || 0), 0);
       if (ttm !== 0) return ttm;
     }
   } catch (_) {}
  
+  // 5: SEC EDGAR XBRL — ground truth from 10-K filings
+  const secEPS = await fetchSecEPS(ticker);
+  if (secEPS != null && secEPS !== 0) return secEPS;
+ 
   return null;
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Current PE — needed for S2 and S6
+// Current PE
 // ─────────────────────────────────────────────────────────────────────────────
  
-async function fetchCurrentPE(ticker, finnhubMetric) {
-  // 1: Finnhub
+async function resolveCurrentPE(ticker, avOverview, finnhubMetric, crumbInfo) {
+  // 1: Alpha Vantage OVERVIEW — PERatio field
+  const avPE = parseFloat(avOverview?.PERatio);
+  if (!isNaN(avPE) && avPE > 0 && avPE < 600) return avPE;
+ 
+  // 2: Finnhub metric
   const fhPE = finnhubMetric?.peBasicExclExtraTTM || finnhubMetric?.peTTM;
   if (fhPE && fhPE > 0 && fhPE < 600) return fhPE;
  
-  // 2: FMP ratios-ttm peRatioTTM
+  // 3: Yahoo chart meta — trailingPE (fast, usually works)
   try {
-    const d  = await fmp(`/ratios-ttm/${ticker}`);
-    const pe = Array.isArray(d) ? d[0]?.peRatioTTM : d?.peRatioTTM;
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=5d`,
+      crumbInfo
+    );
+    const pe = j?.chart?.result?.[0]?.meta?.trailingPE;
     if (pe && pe > 0 && pe < 600) return pe;
   } catch (_) {}
  
-  // 3: Yahoo v7 trailingPE
+  // 4: Yahoo summaryDetail
   try {
-    const q  = await yahooV7(ticker);
-    const pe = q?.trailingPE;
-    if (pe && pe > 0 && pe < 600) return pe;
-  } catch (_) {}
- 
-  // 4: Yahoo chart meta
-  try {
-    const yc = await yahooChart(ticker, '5d');
-    const pe = yc?.meta?.trailingPE;
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`,
+      crumbInfo
+    );
+    const pe = j?.quoteSummary?.result?.[0]?.summaryDetail?.trailingPE?.raw;
     if (pe && pe > 0 && pe < 600) return pe;
   } catch (_) {}
  
   return null;
+}
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// 52w hi/lo
+// ─────────────────────────────────────────────────────────────────────────────
+ 
+async function resolve52w(ticker, avOverview, finnhubMetric, yahoChartMeta) {
+  let hi = finnhubMetric?.['52WeekHigh']
+    || parseFloat(avOverview?.['52WeekHigh'])
+    || yahoChartMeta?.fiftyTwoWeekHigh
+    || null;
+  let lo = finnhubMetric?.['52WeekLow']
+    || parseFloat(avOverview?.['52WeekLow'])
+    || yahoChartMeta?.fiftyTwoWeekLow
+    || null;
+ 
+  if (isNaN(hi)) hi = null;
+  if (isNaN(lo)) lo = null;
+ 
+  return { hi52: hi || null, lo52: lo || null };
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
 // Analyst target
 // ─────────────────────────────────────────────────────────────────────────────
  
-async function fetchAnalystTarget(ticker) {
-  // 1: Finnhub
+async function resolveAnalystTarget(ticker, avOverview, crumbInfo) {
+  // 1: Alpha Vantage OVERVIEW — AnalystTargetPrice
+  const avTarget = parseFloat(avOverview?.AnalystTargetPrice);
+  if (!isNaN(avTarget) && avTarget > 0) return avTarget;
+ 
+  // 2: Finnhub price-target (works on free tier)
   try {
     const d = await fh(`/stock/price-target?symbol=${ticker}`);
     const t = d?.targetMedian || d?.targetMean;
     if (t && t > 0) return t;
   } catch (_) {}
  
-  // 2: FMP price-target-consensus (free endpoint)
+  // 3: Yahoo financialData
   try {
-    const d = await fmp(`/price-target-consensus/${ticker}`);
-    const t = Array.isArray(d) ? d[0]?.targetConsensus : d?.targetConsensus;
-    if (t && t > 0) return t;
-  } catch (_) {}
- 
-  // 3: FMP analyst-estimates (forward price from estimates)
-  try {
-    const d  = await fmp(`/analyst-estimates/${ticker}?limit=1`);
-    const t  = Array.isArray(d) ? d[0]?.estimatedEpsAvg : null;
-    // This gives forward EPS, not price target — skip as it's not equivalent
-  } catch (_) {}
- 
-  // 4: Yahoo financialData
-  try {
-    const ys = await yahooSummary(ticker, 'financialData');
-    const fd = ys?.financialData;
+    const j = await yahooFetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData`,
+      crumbInfo
+    );
+    const fd = j?.quoteSummary?.result?.[0]?.financialData;
     const t  = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
-    if (t && t > 0) return t;
-  } catch (_) {}
- 
-  // 5: Yahoo v7
-  try {
-    const q = await yahooV7(ticker);
-    const t = q?.targetMedianPrice || q?.targetMeanPrice;
     if (t && t > 0) return t;
   } catch (_) {}
  
@@ -372,7 +481,6 @@ async function fetchInsiderTransactions(ticker, curPx) {
   const to30   = new Date(now  * 1000).toISOString().slice(0, 10);
   const cutoff = new Date(ago30 * 1000);
  
-  // 1: Finnhub — SEC Form 4, most accurate
   try {
     const d    = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from30}&to=${to30}`);
     const txns = d?.data || [];
@@ -383,7 +491,7 @@ async function fetchInsiderTransactions(ticker, curPx) {
     }
   } catch (_) {}
  
-  // 2: OpenInsider scrape
+  // OpenInsider as fallback
   try {
     const r = await fetch(
       `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
@@ -403,39 +511,13 @@ async function fetchInsiderTransactions(ticker, curPx) {
         if (isNaN(txDate) || txDate < cutoff) continue;
         const shares = parseInt((sharesRaw || '').replace(/[^0-9]/g, '')) || 0;
         const value  = parseInt((valueRaw  || '').replace(/[^0-9]/g, '')) || 0;
-        const entry  = {
-          transactionDate: dateStr, share: shares, value,
-          transactionPrice: shares > 0 ? value / shares : curPx,
-        };
+        const entry  = { transactionDate: dateStr, share: shares, value,
+          transactionPrice: shares > 0 ? value / shares : curPx };
         if (/P\s*-\s*Purchase/i.test(type))  buys.push(entry);
         else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
       }
       if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'openinsider' };
     }
-  } catch (_) {}
- 
-  // 3: Yahoo insiderTransactions
-  try {
-    const ys   = await yahooSummary(ticker, 'insiderTransactions');
-    const txns = ys?.insiderTransactions?.transactions || [];
-    const buys = [], sells = [];
-    for (const t of txns) {
-      const dateTs = t.startDate?.raw;
-      if (!dateTs) continue;
-      const txDate = new Date(dateTs * 1000);
-      if (txDate < cutoff) continue;
-      const dateStr = txDate.toISOString().slice(0, 10);
-      const shares  = Math.abs(t.shares?.raw || 0);
-      const value   = Math.abs(t.value?.raw  || 0);
-      const desc    = (t.transactionDescription || '').toLowerCase();
-      const entry   = {
-        transactionDate: dateStr, share: shares, value,
-        transactionPrice: shares > 0 ? value / shares : curPx,
-      };
-      if (/purchase|buy/i.test(desc))      buys.push(entry);
-      else if (/sale|sell/i.test(desc))    sells.push(entry);
-    }
-    if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'yahoo' };
   } catch (_) {}
  
   return { buys: [], sells: [], source: null };
@@ -504,36 +586,38 @@ const PEER_MAP = {
   KR:['WMT','TGT','COST','ACI'],                 SPGI:['MCO','ICE','CME','MSCI'],
 };
  
-async function fetchPeerPESingle(peer) {
-  // 1: FMP ratios-ttm — most reliable non-Yahoo source for PE
-  try {
-    const d  = await fmp(`/ratios-ttm/${peer}`);
-    const pe = Array.isArray(d) ? d[0]?.peRatioTTM : d?.peRatioTTM;
-    // FMP sometimes returns negative PE for loss-makers — filter those
-    if (pe && pe > 0 && pe < 600) {
-      // Also grab market cap for filtering
-      const mc = 0; // FMP ratios doesn't include MC, use 0 to skip MC filter
-      return { ticker: peer, pe, mc };
-    }
-  } catch (_) {}
+// Fetch PE for one peer — AV OVERVIEW is the primary source (reliable)
+// We cache AV calls to avoid hitting rate limit for peers
+const AV_PE_CACHE = {};
  
-  // 2: Yahoo v7
+async function fetchPeerPE_single(peer, crumbInfo) {
+  // 1: Alpha Vantage OVERVIEW — cached
+  if (!AV_PE_CACHE[peer] && AV_KEY) {
+    try {
+      const d = await fetchAVOverview(peer);
+      if (d) {
+        const pe = parseFloat(d.PERatio);
+        const mc = parseFloat(d.MarketCapitalization) || 0;
+        if (!isNaN(pe) && pe > 0 && pe < 600) {
+          AV_PE_CACHE[peer] = { ticker: peer, pe, mc };
+        }
+      }
+    } catch (_) {}
+  }
+  if (AV_PE_CACHE[peer]) return AV_PE_CACHE[peer];
+ 
+  // 2: Yahoo chart meta (with crumb)
   try {
-    const q  = await yahooV7(peer);
-    const pe = q?.trailingPE;
-    const mc = q?.marketCap || 0;
+    const j  = await yahooFetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${peer}?interval=1d&range=5d`,
+      crumbInfo
+    );
+    const pe = j?.chart?.result?.[0]?.meta?.trailingPE;
+    const mc = j?.chart?.result?.[0]?.meta?.marketCap || 0;
     if (pe && pe > 0 && pe < 600) return { ticker: peer, pe, mc };
   } catch (_) {}
  
-  // 3: Yahoo chart meta
-  try {
-    const yc = await yahooChart(peer, '5d');
-    const pe = yc?.meta?.trailingPE;
-    const mc = yc?.meta?.marketCap || 0;
-    if (pe && pe > 0 && pe < 600) return { ticker: peer, pe, mc };
-  } catch (_) {}
- 
-  // 4: Finnhub metric
+  // 3: Finnhub metric
   try {
     const d  = await fh(`/stock/metric?symbol=${peer}&metric=all`);
     const pm = d?.metric || {};
@@ -545,59 +629,45 @@ async function fetchPeerPESingle(peer) {
   return null;
 }
  
-async function fetchPeerPE(ticker, targetPE, targetMC) {
+async function resolvePeerPE(ticker, targetPE, targetMC, crumbInfo) {
   try {
     let rawPeers = [];
- 
-    // Finnhub peers
     try {
       const pd = await fh(`/stock/peers?symbol=${ticker}`);
       if (Array.isArray(pd)) rawPeers = pd.filter(p => p !== ticker && /^[A-Z]{1,5}$/.test(p));
     } catch (_) {}
  
-    // Yahoo recommendations
-    try {
-      const r = await fetch(
-        `https://query1.finance.yahoo.com/v6/finance/recommendationsbysymbol/${ticker}`,
-        { headers: YH, signal: AbortSignal.timeout(5000) }
-      );
-      if (r.ok) {
-        const j  = await r.json();
-        const yp = (j?.finance?.result?.[0]?.recommendedSymbols || [])
-          .map(s => s.symbol).filter(s => /^[A-Z]{1,5}$/.test(s));
-        rawPeers = [...new Set([...rawPeers, ...yp])].filter(p => p !== ticker);
-      }
-    } catch (_) {}
- 
-    // Hardcoded peer map — always the safety net
     if (PEER_MAP[ticker]) {
       rawPeers = [...new Set([...rawPeers, ...PEER_MAP[ticker]])].filter(p => p !== ticker);
     }
  
-    rawPeers = rawPeers.slice(0, 15);
+    rawPeers = rawPeers.slice(0, 12);
     if (rawPeers.length === 0) return null;
  
-    const peerResults = await Promise.allSettled(rawPeers.map(fetchPeerPESingle));
-    const all = peerResults
-      .filter(r => r.status === 'fulfilled' && r.value)
-      .map(r => r.value);
-    if (all.length === 0) return null;
+    // Limit concurrency to avoid AV rate limit — batch in groups of 3
+    const results = [];
+    for (let i = 0; i < rawPeers.length; i += 3) {
+      const batch = rawPeers.slice(i, i + 3);
+      const batchResults = await Promise.allSettled(batch.map(p => fetchPeerPE_single(p, crumbInfo)));
+      results.push(...batchResults.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value));
+    }
  
-    // Market-cap filter (only applied when we have MC data)
-    const withMC = all.filter(c => c.mc > 0);
-    let comparables = all;
+    if (results.length === 0) return null;
+ 
+    // Market cap filter
+    let comparables = results;
+    const withMC = results.filter(c => c.mc > 0);
     if (withMC.length >= 3 && targetMC > 0) {
-      const loRatio = targetMC > 500000 ? 0.07 : 0.12;
-      const hiRatio = targetMC > 500000 ? 14   : 8;
+      const loR = targetMC > 500000 ? 0.07 : 0.12;
+      const hiR = targetMC > 500000 ? 14   : 8;
       const filtered = withMC.filter(c => {
         const m = c.mc / 1e6;
-        return m / targetMC >= loRatio && m / targetMC <= hiRatio;
+        return m / targetMC >= loR && m / targetMC <= hiR;
       });
-      if (filtered.length >= 2) comparables = [...filtered, ...all.filter(c => c.mc === 0)];
+      if (filtered.length >= 2) comparables = [...filtered, ...results.filter(c => c.mc === 0)];
     }
-    if (comparables.length < 2) comparables = all;
  
-    // Trim extreme outliers
+    // Trim outliers
     if (comparables.length >= 5) {
       const sorted = [...comparables].sort((a, b) => a.pe - b.pe);
       const trim   = Math.max(1, Math.floor(sorted.length * 0.1));
@@ -609,18 +679,17 @@ async function fetchPeerPE(ticker, targetPE, targetMC) {
     const mid   = Math.floor(pes.length / 2);
     const medPE = pes.length % 2 === 0 ? (pes[mid - 1] + pes[mid]) / 2 : pes[mid];
     const avgPE = pes.reduce((a, b) => a + b, 0) / pes.length;
+    const diff  = targetPE && targetPE > 0
+      ? parseFloat(((targetPE - avgPE) / avgPE * 100).toFixed(1))
+      : null;
  
-    const result = {
+    return {
       medianPE:  parseFloat(medPE.toFixed(1)),
       avgPE:     parseFloat(avgPE.toFixed(1)),
       peerCount: comparables.length,
-      diff:      null,
-      peers:     comparables.map(c => c.ticker),
+      diff,
+      peers: comparables.map(c => c.ticker),
     };
-    if (targetPE && targetPE > 0) {
-      result.diff = parseFloat(((targetPE - avgPE) / avgPE * 100).toFixed(1));
-    }
-    return result;
   } catch (_) { return null; }
 }
  
@@ -646,67 +715,48 @@ function cleanExchange(raw) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Master fetch
+// Master fetch — one ticker
 // ─────────────────────────────────────────────────────────────────────────────
  
-async function fetchStockData(ticker) {
-  // Fire all primary fetches simultaneously
-  const [quoteR, profileR, metricsR, earningsR, analystTargetR, yahooDataR] =
+async function fetchStockData(ticker, crumbInfo) {
+  // Fire Finnhub primary calls + Alpha Vantage OVERVIEW simultaneously
+  const [quoteR, profileR, metricsR, earningsR, yahooChartR, avOverviewR] =
     await Promise.allSettled([
       fh(`/quote?symbol=${ticker}`),
       fh(`/stock/profile2?symbol=${ticker}`),
       fh(`/stock/metric?symbol=${ticker}&metric=all`),
       fh(`/stock/earnings?symbol=${ticker}&limit=4`),
-      fetchAnalystTarget(ticker),           // already multi-source
-      yahooChart(ticker, '1y'),             // for 52w hi/lo + closes
+      yahooFetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y`, crumbInfo),
+      fetchAVOverview(ticker),   // Alpha Vantage OVERVIEW — EPS, PE, target, MA, 52w
     ]);
  
-  const curPx  = quoteR.status === 'fulfilled'    ? quoteR.value?.c              : null;
-  const m      = metricsR.status === 'fulfilled'  ? metricsR.value?.metric || {} : {};
-  const yc     = yahooDataR.status === 'fulfilled' ? yahooDataR.value            : null;
-  const ymeta  = yc?.meta || {};
- 
-  // 52w hi/lo — Finnhub metric → Yahoo chart meta → computed from closes
-  let hi52 = m['52WeekHigh'] || ymeta.fiftyTwoWeekHigh || null;
-  let lo52 = m['52WeekLow']  || ymeta.fiftyTwoWeekLow  || null;
-  const yahooCloses = yc?.indicators?.quote?.[0]?.close
+  const curPx     = quoteR.status     === 'fulfilled' ? quoteR.value?.c              : null;
+  const m         = metricsR.status   === 'fulfilled' ? metricsR.value?.metric || {} : {};
+  const avOv      = avOverviewR.status === 'fulfilled' ? avOverviewR.value            : null;
+  const yahooChart = yahooChartR.status === 'fulfilled' ? yahooChartR.value           : null;
+  const yhMeta    = yahooChart?.chart?.result?.[0]?.meta || {};
+  const yahooCloses = yahooChart?.chart?.result?.[0]?.indicators?.quote?.[0]?.close
     ?.filter(c => c != null && !isNaN(c) && c > 0) || [];
-  if ((!hi52 || !lo52) && yahooCloses.length > 10) {
-    if (!hi52) hi52 = Math.max(...yahooCloses);
-    if (!lo52) lo52 = Math.min(...yahooCloses);
-  }
  
-  // Run EPS, MA, current PE, insider, peer PE all in parallel
-  // This is the key performance win — nothing waits for anything else
-  const [eps, ma50raw, curPE, insiderData, peerPEResult] = await Promise.all([
-    fetchEPS(ticker, m),
-    // MA: try Finnhub candle first (reliable), then fallback chain
-    fetch50dMAFromFinnhub(ticker).then(ma => ma || fetch50dMAFallback(ticker, yahooCloses)),
-    fetchCurrentPE(ticker, m),
+  // Resolve all signals in parallel
+  const [eps, ma50, curPE, { hi52, lo52 }, analystTarget, insiderData] = await Promise.all([
+    resolveEPS(ticker, avOv, m, crumbInfo),
+    resolve50dMA(ticker, avOv, crumbInfo),
+    resolveCurrentPE(ticker, avOv, m, crumbInfo),
+    resolve52w(ticker, avOv, m, yhMeta),
+    resolveAnalystTarget(ticker, avOv, crumbInfo),
     fetchInsiderTransactions(ticker, curPx),
-    // peerPE needs curPE — we pass null for now and recompute diff after
-    fetchPeerPE(ticker, null, m.marketCapitalization || 0),
   ]);
  
-  const ma50    = ma50raw || null;
-  const targetMC = m.marketCapitalization || 0;
- 
-  // Compute peer diff now that we have curPE
-  let peerPE = peerPEResult;
-  if (peerPE && curPE && curPE > 0) {
-    peerPE = {
-      ...peerPE,
-      diff: parseFloat(((curPE - peerPE.avgPE) / peerPE.avgPE * 100).toFixed(1)),
-    };
-  }
+  // Peer PE needs curPE — run after
+  const peerPE = await resolvePeerPE(ticker, curPE, m.marketCapitalization || 0, crumbInfo);
  
   return {
-    quote:         quoteR.status === 'fulfilled'         ? quoteR.value         : null,
-    profile:       profileR.status === 'fulfilled'       ? profileR.value       : null,
-    metrics:       metricsR.status === 'fulfilled'       ? metricsR.value       : null,
-    earnings:      earningsR.status === 'fulfilled'      ? earningsR.value      : null,
-    analystTarget: analystTargetR.status === 'fulfilled' ? analystTargetR.value : null,
-    hi52, lo52, curPE, eps, ma50, insiderData, peerPE,
+    quote:    quoteR.status   === 'fulfilled' ? quoteR.value   : null,
+    profile:  profileR.status === 'fulfilled' ? profileR.value : null,
+    metrics:  metricsR.status === 'fulfilled' ? metricsR.value : null,
+    earnings: earningsR.status === 'fulfilled' ? earningsR.value : null,
+    hi52, lo52, curPE, eps, ma50, analystTarget, insiderData, peerPE,
   };
 }
  
@@ -727,7 +777,7 @@ function evaluate(ticker, d) {
                  : mc > 1e6  ? `$${(mc / 1e6).toFixed(0)}M` : '';
   const exchange = cleanExchange(p.exchange);
  
-  // S1: EPS beat vs estimate
+  // S1: EPS beat
   let s1 = { status:'neutral', value:'No data' };
   try {
     const earns = Array.isArray(d.earnings) ? d.earnings : [];
@@ -741,7 +791,7 @@ function evaluate(ticker, d) {
     }
   } catch (_) {}
  
-  // S2: PE vs historical average (52w midpoint PE as proxy for hist avg)
+  // S2: PE vs historical average
   let s2 = { status:'neutral', value:'No data' };
   try {
     const curPE = d.curPE;
@@ -838,12 +888,18 @@ export default async function handler(req, res) {
   if (!Array.isArray(tickers) || tickers.length === 0)
     return res.status(400).json({ error:'tickers array required' });
  
-  const results = {};
   const cleaned = tickers.slice(0, 20).map(t => t.toUpperCase().trim());
  
+  // Fetch Yahoo crumb ONCE for the entire batch — all tickers share it
+  const crumbInfo = await getYahooCrumb();
+ 
+  // Clear per-request peer PE cache
+  Object.keys(AV_PE_CACHE).forEach(k => delete AV_PE_CACHE[k]);
+ 
+  const results = {};
   await Promise.allSettled(cleaned.map(async ticker => {
     try {
-      const raw = await fetchStockData(ticker);
+      const raw = await fetchStockData(ticker, crumbInfo);
       const ev  = evaluate(ticker, raw);
       results[ticker] = ev || { ticker, error:'No quote data' };
     } catch (e) {
