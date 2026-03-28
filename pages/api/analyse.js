@@ -1,40 +1,53 @@
-// pages/api/analyse.js  v6
+// pages/api/analyse.js  v7
 //
-// Every signal has 6–10 independent data sources with fallback chains.
-// Sources used (in priority order per signal):
+// Fix for "no data" pill boxes:
 //
-//  ALWAYS WORKS (Finnhub authenticated API):
-//    /quote, /stock/profile2, /stock/earnings, /stock/insider-transactions,
-//    /stock/price-target, /stock/peers, /stock/candle (→ S3 50d MA)
+//  PROBLEM 1 — Sequential fallback chains timed out before reaching reliable sources.
+//    Each signal tried sources one-by-one. If Yahoo (source 1) took 6s and timed out,
+//    the remaining 4 reliable sources never ran within Vercel's 10s limit.
 //
-//  PAGE SCRAPERS (embedded JSON in public pages — no auth, no IP blocks):
-//    stockanalysis.com  → __NEXT_DATA__ JSON: EPS, PE, revenue, analyst target
-//    macrotrends.net    → chartData JSON: PE ratio history, EPS history
-//    marketwatch.com    → __PRELOADED_STATE__ JSON: PE, EPS, price target
-//    zacks.com          → HTML patterns: PE, EPS, analyst targets
-//    wisesheets.io      → public quote data
+//  PROBLEM 2 — Duplicate page fetches wasted time budget.
+//    resolveEPS, resolvePE, and resolveMA50 each independently called fetchStockAnalysis(),
+//    fetchMarketWatch(), fetchZacks() — fetching the same HTML page 3 times per signal group.
 //
-//  YAHOO (crumb-authenticated to bypass Vercel IP block):
-//    /v8/finance/chart   → closes for MA computation, 52w hi/lo, PE
-//    /v10/quoteSummary   → EPS, analyst target, PE
+//  FIX 1 — All scraper pages (stockanalysis, marketwatch, zacks) are now fetched ONCE
+//    per ticker upfront in fetchStockData(), results shared across all signal resolvers.
 //
-//  SEC EDGAR (government — never blocked):
-//    /api/xbrl/companyfacts → EPS from 10-K/10-Q XBRL data
+//  FIX 2 — Signal resolvers now race their top sources in parallel using Promise.any()
+//    instead of trying them sequentially. First valid result wins, no time wasted waiting
+//    for a slow source when a faster one has the answer.
 //
-//  ALPHA VANTAGE (if AV_KEY env var set — free at alphavantage.co):
-//    OVERVIEW → EPS, PE, 50dMA, analyst target, 52w hi/lo all in one call
+//  FIX 3 — Per-source timeouts tightened:
+//    Page scrapers: 9s → 5s  (enough for fast CDN responses, cuts losses on slow ones)
+//    Yahoo API:     7s → 4s
+//    Finnhub:       10s → 6s
+//    SEC EDGAR:     12s → 8s  (government CDN, usually fast)
+//
+//  FIX 4 — resolveMA50 Stooq CSV fetch was last in chain; moved earlier as it's
+//    extremely reliable (no auth, no IP blocks, fast CSV response).
+//
+// Sources used (priority order within each parallel race):
+//   Finnhub authenticated API: /quote, /stock/profile2, /stock/earnings,
+//     /stock/insider-transactions, /stock/price-target, /stock/peers, /stock/candle
+//   Alpha Vantage OVERVIEW (if AV_KEY set): EPS, PE, MA50, target, 52w in one call
+//   Yahoo Finance (crumb-auth): chart closes, summaryDetail, quoteSummary modules
+//   stockanalysis.com __NEXT_DATA__: EPS, PE, analyst target
+//   macrotrends.net chartData: PE history, EPS history
+//   marketwatch.com __PRELOADED_STATE__: PE, EPS
+//   zacks.com HTML: PE, EPS, analyst targets
+//   SEC EDGAR XBRL: EPS from 10-K/10-Q (government, never blocked)
+//   Stooq CSV: closes for MA computation (no auth, no IP blocks)
 //
 // ENV VARS:
-//   FINNHUB_KEY  — required (finnhub.io)
+//   FINNHUB_KEY  — required
 //   AV_KEY       — optional but strongly recommended (alphavantage.co, free)
  
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
 const AV_KEY      = process.env.AV_KEY;
  
-const FH  = 'https://finnhub.io/api/v1';
-const AV  = 'https://www.alphavantage.co/query';
+const FH = 'https://finnhub.io/api/v1';
+const AV = 'https://www.alphavantage.co/query';
  
-// Browser-like headers — critical for page scrapers
 const BROWSER = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -55,7 +68,7 @@ const API_HEADERS = {
 };
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Core fetchers
+// Core fetchers — tightened timeouts so fallbacks actually get reached
 // ─────────────────────────────────────────────────────────────────────────────
  
 async function fh(path) {
@@ -63,7 +76,7 @@ async function fh(path) {
   const sep = path.includes('?') ? '&' : '?';
   const r = await fetch(`${FH}${path}${sep}token=${FINNHUB_KEY}`, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(6000), // was 10000
   });
   if (!r.ok) throw new Error(`Finnhub ${r.status}`);
   const d = await r.json();
@@ -71,14 +84,34 @@ async function fh(path) {
   return d;
 }
  
-async function getPage(url, timeoutMs = 9000) {
+async function getPage(url, timeoutMs = 5000) { // was 9000
   const r = await fetch(url, { headers: BROWSER, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.text();
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Yahoo crumb auth — one crumb per request batch
+// Promise.any() helper — resolves with first non-null valid value
+// Used to race multiple sources in parallel instead of trying sequentially
+// ─────────────────────────────────────────────────────────────────────────────
+async function raceValid(fns, validate = v => v != null && v !== 0 && !isNaN(v)) {
+  return new Promise((resolve) => {
+    let settled = 0;
+    const total = fns.length;
+    if (total === 0) { resolve(null); return; }
+    fns.forEach(fn => {
+      Promise.resolve().then(fn).then(val => {
+        if (validate(val)) resolve(val);
+      }).catch(() => {}).finally(() => {
+        settled++;
+        if (settled === total) resolve(null);
+      });
+    });
+  });
+}
+ 
+// ─────────────────────────────────────────────────────────────────────────────
+// Yahoo crumb auth
 // ─────────────────────────────────────────────────────────────────────────────
  
 let _crumb = null, _cookies = '', _crumbTs = 0;
@@ -86,20 +119,17 @@ let _crumb = null, _cookies = '', _crumbTs = 0;
 async function getYahooCrumb() {
   if (_crumb && Date.now() - _crumbTs < 300000) return { crumb: _crumb, cookies: _cookies };
   try {
-    // Fetch consent page to get cookies
     const home = await fetch('https://finance.yahoo.com/', {
       headers: { 'User-Agent': BROWSER['User-Agent'], 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' },
-      redirect: 'follow', signal: AbortSignal.timeout(8000),
+      redirect: 'follow', signal: AbortSignal.timeout(6000),
     });
     const setCookie = home.headers.get('set-cookie') || '';
     _cookies = setCookie.split(',').map(c => c.split(';')[0].trim()).filter(c => c.includes('=')).join('; ');
- 
-    // Get crumb
     for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
       try {
         const cr = await fetch(`${base}/v1/test/getcrumb`, {
           headers: { 'User-Agent': BROWSER['User-Agent'], 'Accept': '*/*', 'Cookie': _cookies },
-          signal: AbortSignal.timeout(6000),
+          signal: AbortSignal.timeout(4000),
         });
         if (cr.ok) {
           const text = await cr.text();
@@ -121,7 +151,7 @@ async function yahooFetch(path, crumbInfo) {
     try {
       const r = await fetch(`${base}${path}${qs}`, {
         headers: { ...API_HEADERS, ...(cookies ? { Cookie: cookies } : {}) },
-        signal: AbortSignal.timeout(7000),
+        signal: AbortSignal.timeout(4000), // was 7000
       });
       if (r.status === 401 || r.status === 429) continue;
       if (!r.ok) continue;
@@ -132,7 +162,7 @@ async function yahooFetch(path, crumbInfo) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Alpha Vantage OVERVIEW — single call returns EPS, PE, MA50, target, 52w
+// Alpha Vantage OVERVIEW
 // ─────────────────────────────────────────────────────────────────────────────
  
 const _avCache = {};
@@ -141,7 +171,7 @@ async function fetchAV(ticker) {
   if (!AV_KEY) return null;
   try {
     const r = await fetch(`${AV}?function=OVERVIEW&symbol=${ticker}&apikey=${AV_KEY}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000),
+      headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000),
     });
     if (!r.ok) return null;
     const d = await r.json();
@@ -152,70 +182,54 @@ async function fetchAV(ticker) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// stockanalysis.com — __NEXT_DATA__ has EPS, PE, analyst target, revenue
+// Page scrapers — fetched ONCE per ticker, results shared across all resolvers
+// Previously each resolver independently fetched the same pages (3× waste)
 // ─────────────────────────────────────────────────────────────────────────────
  
-const _saCache = {};
 async function fetchStockAnalysis(ticker) {
-  if (_saCache[ticker]) return _saCache[ticker];
   try {
     const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/`);
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!m) return null;
-    const data = JSON.parse(m[1]);
-    // Navigate to the quote data
-    const props = data?.props?.pageProps;
-    const quote = props?.data?.quote || props?.quote || null;
-    if (quote) { _saCache[ticker] = quote; return quote; }
+    if (m) {
+      const data = JSON.parse(m[1]);
+      const props = data?.props?.pageProps;
+      const quote = props?.data?.quote || props?.quote || null;
+      if (quote) return { quote };
+    }
   } catch (_) {}
-  // Also try financials page for EPS
   try {
     const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/financials/`);
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!m) return null;
-    const data = JSON.parse(m[1]);
-    const fin  = data?.props?.pageProps?.data || null;
-    if (fin) { _saCache[ticker] = fin; return fin; }
+    if (m) {
+      const data = JSON.parse(m[1]);
+      const fin = data?.props?.pageProps?.data || null;
+      if (fin) return { fin };
+    }
   } catch (_) {}
   return null;
 }
  
-// Extract numbers from stockanalysis data — handles various schema shapes
 function saExtract(sa, fields) {
   if (!sa) return null;
+  // Accept either shape: { quote: {...} } or { fin: {...} } or raw object
+  const obj = sa?.quote || sa?.fin || sa;
   for (const field of fields) {
     const parts = field.split('.');
-    let val = sa;
+    let val = obj;
     for (const p of parts) { val = val?.[p]; if (val === undefined) break; }
     if (val != null && val !== '' && !isNaN(parseFloat(val))) return parseFloat(val);
   }
   return null;
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// marketwatch.com — __PRELOADED_STATE__ JSON has PE, EPS, price target
-// ─────────────────────────────────────────────────────────────────────────────
- 
-const _mwCache = {};
 async function fetchMarketWatch(ticker) {
-  if (_mwCache[ticker]) return _mwCache[ticker];
   try {
     const html = await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}`);
- 
-    // Try __PRELOADED_STATE__
     const m1 = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
     if (m1) {
-      try {
-        const d = JSON.parse(m1[1]);
-        _mwCache[ticker] = { type: 'state', data: d };
-        return _mwCache[ticker];
-      } catch (_) {}
+      try { return { type: 'state', data: JSON.parse(m1[1]), raw: html }; } catch (_) {}
     }
- 
-    // Extract individual fields from HTML patterns
-    const result = { type: 'html', raw: html };
-    _mwCache[ticker] = result;
-    return result;
+    return { type: 'html', raw: html };
   } catch (_) { return null; }
 }
  
@@ -223,21 +237,12 @@ function mwExtractPE(mw) {
   if (!mw) return null;
   if (mw.type === 'state') {
     const d = mw.data;
-    // Try various paths in the state tree
-    const paths = [
-      d?.instrumentData?.primaryData?.peRatio,
-      d?.quote?.peRatio,
-      d?.stock?.peRatio,
-    ];
-    for (const v of paths) { if (v && !isNaN(parseFloat(v))) return parseFloat(v); }
+    for (const v of [d?.instrumentData?.primaryData?.peRatio, d?.quote?.peRatio, d?.stock?.peRatio]) {
+      if (v && !isNaN(parseFloat(v))) return parseFloat(v);
+    }
   }
   if (mw.raw) {
-    // HTML patterns
-    for (const p of [
-      /"peRatio"\s*:\s*"?([\d.]+)"?/,
-      /P\/E Ratio[^<]*<\/span>[^<]*<span[^>]*>([\d.]+)/,
-      /class="[^"]*pe-ratio[^"]*"[^>]*>([\d.]+)/,
-    ]) {
+    for (const p of [/"peRatio"\s*:\s*"?([\d.]+)"?/, /P\/E Ratio[^<]*<\/span>[^<]*<span[^>]*>([\d.]+)/, /class="[^"]*pe-ratio[^"]*"[^>]*>([\d.]+)/]) {
       const m = mw.raw.match(p);
       if (m) { const v = parseFloat(m[1]); if (v > 0 && v < 1000) return v; }
     }
@@ -247,37 +252,22 @@ function mwExtractPE(mw) {
  
 function mwExtractEPS(mw) {
   if (!mw?.raw) return null;
-  for (const p of [
-    /"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/,
-    /EPS \(TTM\)[^<]*<\/[^>]+>[^<]*<[^>]+>([-\d.]+)/,
-    /"eps"\s*:\s*([-\d.]+)/,
-  ]) {
+  for (const p of [/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/, /EPS \(TTM\)[^<]*<\/[^>]+>[^<]*<[^>]+>([-\d.]+)/, /"eps"\s*:\s*([-\d.]+)/]) {
     const m = mw.raw.match(p);
     if (m) { const v = parseFloat(m[1]); if (v !== 0 && !isNaN(v)) return v; }
   }
   return null;
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// zacks.com — has PE, EPS, analyst targets
-// ─────────────────────────────────────────────────────────────────────────────
- 
 async function fetchZacks(ticker) {
   try {
-    const html = await getPage(`https://www.zacks.com/stock/quote/${ticker.toUpperCase()}`);
-    return html;
+    return await getPage(`https://www.zacks.com/stock/quote/${ticker.toUpperCase()}`);
   } catch (_) { return null; }
 }
  
 function zacksExtractPE(html) {
   if (!html) return null;
-  for (const p of [
-    /P\/E Ratio[^<]*<\/dt>[^<]*<dd[^>]*>([\d.]+)/,
-    /"peRatio"\s*:\s*([\d.]+)/,
-    /class="[^"]*pe_ratio[^"]*"[^>]*>([\d.]+)/,
-    /P\/E\s*<[^>]+>\s*([\d.]+)/,
-    /Earnings Per Share[^<]*<[^>]+>([-\d.]+)/,
-  ]) {
+  for (const p of [/P\/E Ratio[^<]*<\/dt>[^<]*<dd[^>]*>([\d.]+)/, /"peRatio"\s*:\s*([\d.]+)/, /class="[^"]*pe_ratio[^"]*"[^>]*>([\d.]+)/, /P\/E\s*<[^>]+>\s*([\d.]+)/]) {
     const m = html.match(p);
     if (m) { const v = parseFloat(m[1]); if (v > 0 && v < 1000) return v; }
   }
@@ -286,37 +276,19 @@ function zacksExtractPE(html) {
  
 function zacksExtractTarget(html) {
   if (!html) return null;
-  for (const p of [
-    /Price Target[^<]*<[^>]+>\s*\$([\d.]+)/i,
-    /Zacks Mean Target[^<]*<[^>]+>\s*\$([\d.]+)/i,
-    /"targetPrice"\s*:\s*([\d.]+)/,
-    /consensus.*?target.*?\$([\d,]+\.?\d*)/i,
-  ]) {
+  for (const p of [/Price Target[^<]*<[^>]+>\s*\$([\d.]+)/i, /Zacks Mean Target[^<]*<[^>]+>\s*\$([\d.]+)/i, /"targetPrice"\s*:\s*([\d.]+)/, /consensus.*?target.*?\$([\d,]+\.?\d*)/i]) {
     const m = html.match(p);
     if (m) { const v = parseFloat(m[1].replace(/,/g, '')); if (v > 0) return v; }
   }
   return null;
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// macrotrends.net — PE ratio history and EPS history  
-// ─────────────────────────────────────────────────────────────────────────────
- 
-// Company name → macrotrends slug (needed for URL)
-// We'll try to discover the slug from a search
 async function fetchMacrotrendsEPS(ticker) {
   try {
-    // Macrotrends URLs follow pattern: /stocks/charts/{TICKER}/{company-name}/eps-earnings
-    // Try common format first
-    const html = await getPage(
-      `https://www.macrotrends.net/stocks/charts/${ticker.toUpperCase()}/x/eps-earnings-per-share-diluted`,
-      10000
-    );
-    // Extract annual EPS from chartData
+    const html = await getPage(`https://www.macrotrends.net/stocks/charts/${ticker.toUpperCase()}/x/eps-earnings-per-share-diluted`, 6000);
     const m = html.match(/var\s+chartData\s*=\s*(\[[\s\S]*?\]);/);
     if (m) {
       const arr = JSON.parse(m[1]);
-      // Array of [date, value] sorted newest first
       const recent = arr.filter(a => a?.[1] != null && !isNaN(parseFloat(a[1]))).slice(0, 4);
       if (recent.length > 0) return parseFloat(recent[0][1]);
     }
@@ -325,7 +297,7 @@ async function fetchMacrotrendsEPS(ticker) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// SEC EDGAR — EPS from XBRL filings (government, never blocked)
+// SEC EDGAR
 // ─────────────────────────────────────────────────────────────────────────────
  
 const _cikCache = {};
@@ -356,22 +328,17 @@ async function fetchSecEPS(ticker) {
     if (!cik) return null;
     const r = await fetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`, {
       headers: { 'User-Agent': 'signal-engine/1.0 admin@example.com' },
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(8000),
     });
     if (!r.ok) return null;
     const d = await r.json();
     const facts = d?.facts?.['us-gaap'];
     for (const key of ['EarningsPerShareBasic', 'EarningsPerShareDiluted', 'EarningsPerShareBasicAndDiluted']) {
       const units = facts?.[key]?.units?.['USD/shares'] || [];
-      // Annual 10-K filings first
       const annual = units.filter(e => e.form === '10-K').sort((a, b) => new Date(b.end) - new Date(a.end));
       if (annual.length > 0 && annual[0].val != null) return annual[0].val;
-      // TTM from 4 quarters
       const qtrs = units.filter(e => e.form === '10-Q').sort((a, b) => new Date(b.end) - new Date(a.end)).slice(0, 4);
-      if (qtrs.length === 4) {
-        const ttm = qtrs.reduce((s, q) => s + (q.val || 0), 0);
-        if (ttm !== 0) return ttm;
-      }
+      if (qtrs.length === 4) { const ttm = qtrs.reduce((s, q) => s + (q.val || 0), 0); if (ttm !== 0) return ttm; }
     }
   } catch (_) {}
   return null;
@@ -391,7 +358,7 @@ function timeAgo(ds) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Signal resolvers — each has 6–10 independent sources
+// Signal resolvers — now use raceValid() to run sources in parallel
 // ─────────────────────────────────────────────────────────────────────────────
  
 // ── S3: 50-day Moving Average ─────────────────────────────────────────────────
@@ -404,246 +371,168 @@ function compute50dMA(closes) {
 }
  
 async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
-  // 1. Alpha Vantage OVERVIEW — pre-computed, very reliable
+  // 1. Alpha Vantage pre-computed (instant, no extra fetch)
   const av = parseFloat(avData?.['50DayMovingAverage']);
   if (av > 0 && !isNaN(av)) return av;
  
-  // 2. Compute from Yahoo 1y chart closes (already fetched)
+  // 2. Compute from already-fetched Yahoo 1y closes (free — data already in memory)
   const yhCloses = yahooChartData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
   const yhMA = compute50dMA(yhCloses);
   if (yhMA > 0) return yhMA;
  
-  // 3. Finnhub candle — primary dedicated OHLCV source
-  try {
-    const to   = Math.floor(Date.now()/1000);
-    const from = to - 90*86400;
-    const d = await fh(`/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}`);
-    if (d?.s==='ok' && Array.isArray(d.c) && d.c.length>=20) {
-      const ma = compute50dMA(d.c);
-      if (ma>0) return ma;
-    }
-  } catch (_) {}
- 
-  // 4. Yahoo summaryDetail fiftyDayAverage (different endpoint)
-  try {
-    const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`, crumbInfo);
-    const ma = j?.quoteSummary?.result?.[0]?.summaryDetail?.fiftyDayAverage?.raw;
-    if (ma>0) return ma;
-  } catch (_) {}
- 
-  // 5. Yahoo chart 3mo (shorter range, different params)
-  try {
-    const j = await yahooFetch(`/v8/finance/chart/${ticker}?interval=1d&range=3mo`, crumbInfo);
-    const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
-    const ma = compute50dMA(closes);
-    if (ma>0) return ma;
-  } catch (_) {}
- 
-  // 6. stockanalysis.com — has 50dMA in quote data
-  try {
-    const sa = await fetchStockAnalysis(ticker);
-    const ma = saExtract(sa, ['ma50','movingAverage50','fiftyDayAverage','avg50']);
-    if (ma>0) return ma;
-  } catch (_) {}
- 
-  // 7. MarketWatch embedded state
-  try {
-    const mw = await fetchMarketWatch(ticker);
-    if (mw?.raw) {
-      const m = mw.raw.match(/50.?Day[^<]*<[^>]+>([\d.]+)/i) || mw.raw.match(/"fiftyDayAverage"\s*:\s*([\d.]+)/);
-      if (m) { const v=parseFloat(m[1]); if (v>0) return v; }
-    }
-  } catch (_) {}
- 
-  // 8. Stooq CSV — free, no IP restrictions
-  try {
-    const r = await fetch(`https://stooq.com/q/d/l/?s=${ticker.toLowerCase()}.us&i=d`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000),
-    });
-    if (r.ok) {
+  // 3. Race remaining sources in parallel — first valid result wins
+  return raceValid([
+    // Finnhub candle
+    async () => {
+      const to = Math.floor(Date.now()/1000), from = to - 90*86400;
+      const d = await fh(`/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}`);
+      if (d?.s==='ok' && Array.isArray(d.c) && d.c.length>=20) return compute50dMA(d.c);
+      return null;
+    },
+    // Stooq CSV — very reliable, no auth
+    async () => {
+      const r = await fetch(`https://stooq.com/q/d/l/?s=${ticker.toLowerCase()}.us&i=d`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(5000),
+      });
+      if (!r.ok) return null;
       const text = await r.text();
-      if (text.length>100 && !text.toLowerCase().includes('no data')) {
-        const lines  = text.trim().split('\n').slice(1);
-        const closes = lines.slice(-60).map(l=>parseFloat((l.split(',')[4]||'').trim())).filter(c=>!isNaN(c)&&c>0);
-        const ma = compute50dMA(closes);
-        if (ma>0) return ma;
-      }
-    }
-  } catch (_) {}
- 
-  return null;
+      if (text.length<100 || text.toLowerCase().includes('no data')) return null;
+      const closes = text.trim().split('\n').slice(1).slice(-60)
+        .map(l=>parseFloat((l.split(',')[4]||'').trim())).filter(c=>!isNaN(c)&&c>0);
+      return compute50dMA(closes);
+    },
+    // Yahoo summaryDetail fiftyDayAverage
+    async () => {
+      const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`, crumbInfo);
+      const ma = j?.quoteSummary?.result?.[0]?.summaryDetail?.fiftyDayAverage?.raw;
+      return (ma>0) ? ma : null;
+    },
+    // Yahoo chart 3mo
+    async () => {
+      const j = await yahooFetch(`/v8/finance/chart/${ticker}?interval=1d&range=3mo`, crumbInfo);
+      const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
+      return compute50dMA(closes);
+    },
+  ], v => v != null && v > 0);
 }
  
-// ── S2: EPS (needed for PE vs hist avg) ───────────────────────────────────────
-async function resolveEPS(ticker, avData, fhMetric, crumbInfo) {
-  // 1. Alpha Vantage OVERVIEW.EPS
+// ── EPS ───────────────────────────────────────────────────────────────────────
+async function resolveEPS(ticker, avData, fhMetric, crumbInfo, saData, mwData, zacksHtml) {
+  // 1. Alpha Vantage (already fetched, instant)
   const avEPS = parseFloat(avData?.EPS);
   if (!isNaN(avEPS) && avEPS!==0) return avEPS;
  
-  // 2. Finnhub metric (often null on free tier, but try)
+  // 2. Finnhub metric (already fetched, instant)
   const fhEPS = fhMetric?.epsTTM || fhMetric?.epsBasicExclExtraAnnual;
   if (fhEPS && fhEPS!==0) return fhEPS;
  
-  // 3. Yahoo defaultKeyStatistics trailingEps
-  try {
-    const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`, crumbInfo);
-    const eps = j?.quoteSummary?.result?.[0]?.defaultKeyStatistics?.trailingEps?.raw;
-    if (eps!=null && eps!==0) return eps;
-  } catch (_) {}
+  // 3. Pre-fetched page data (no extra network calls needed)
+  const saEPS = saExtract(saData, ['eps','epsTrailingTwelveMonths','epsTTM','earningsPerShare','netEPS','annualEPS']);
+  if (saEPS!=null && saEPS!==0) return saEPS;
  
-  // 4. Yahoo earningsHistory — TTM sum
-  try {
-    const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=earningsHistory`, crumbInfo);
-    const h = j?.quoteSummary?.result?.[0]?.earningsHistory?.history||[];
-    if (h.length>=2) { const ttm=h.slice(-4).reduce((s,q)=>s+(q?.epsActual?.raw||0),0); if (ttm!==0) return ttm; }
-  } catch (_) {}
+  const mwEPS = mwExtractEPS(mwData);
+  if (mwEPS!=null && mwEPS!==0) return mwEPS;
  
-  // 5. stockanalysis.com __NEXT_DATA__
-  try {
-    const sa = await fetchStockAnalysis(ticker);
-    const eps = saExtract(sa, ['eps','epsTrailingTwelveMonths','epsTTM','earningsPerShare','netEPS','annualEPS']);
-    if (eps!=null && eps!==0) return eps;
-  } catch (_) {}
+  if (zacksHtml) {
+    const m = zacksHtml.match(/EPS\s*\(TTM\)[^<]*<[^>]+>\s*\$?\s*([-\d.]+)/i) ||
+              zacksHtml.match(/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/);
+    if (m) { const v=parseFloat(m[1]); if (v!==0 && !isNaN(v)) return v; }
+  }
  
-  // 6. MarketWatch
-  try {
-    const mw = await fetchMarketWatch(ticker);
-    const eps = mwExtractEPS(mw);
-    if (eps!=null && eps!==0) return eps;
-  } catch (_) {}
- 
-  // 7. Macrotrends EPS
-  try {
-    const eps = await fetchMacrotrendsEPS(ticker);
-    if (eps!=null && eps!==0) return eps;
-  } catch (_) {}
- 
-  // 8. SEC EDGAR XBRL — ground truth from filings
-  try {
-    const eps = await fetchSecEPS(ticker);
-    if (eps!=null && eps!==0) return eps;
-  } catch (_) {}
- 
-  // 9. Zacks HTML scrape
-  try {
-    const html = await fetchZacks(ticker);
-    if (html) {
-      const m = html.match(/EPS\s*\(TTM\)[^<]*<[^>]+>\s*\$?\s*([-\d.]+)/i) ||
-                html.match(/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/);
-      if (m) { const v=parseFloat(m[1]); if (v!==0 && !isNaN(v)) return v; }
-    }
-  } catch (_) {}
- 
-  return null;
+  // 4. Race remaining network sources in parallel
+  return raceValid([
+    async () => {
+      const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`, crumbInfo);
+      return j?.quoteSummary?.result?.[0]?.defaultKeyStatistics?.trailingEps?.raw ?? null;
+    },
+    async () => {
+      const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=earningsHistory`, crumbInfo);
+      const h = j?.quoteSummary?.result?.[0]?.earningsHistory?.history||[];
+      if (h.length>=2) { const ttm=h.slice(-4).reduce((s,q)=>s+(q?.epsActual?.raw||0),0); return ttm!==0?ttm:null; }
+      return null;
+    },
+    () => fetchMacrotrendsEPS(ticker),
+    () => fetchSecEPS(ticker),
+  ], v => v != null && v !== 0 && !isNaN(v));
 }
  
-// ── S2: Current PE ─────────────────────────────────────────────────────────────
-async function resolvePE(ticker, avData, fhMetric, crumbInfo, yahooChartData) {
-  // 1. Alpha Vantage
+// ── Current PE ────────────────────────────────────────────────────────────────
+async function resolvePE(ticker, avData, fhMetric, crumbInfo, yahooChartData, saData, mwData, zacksHtml) {
+  // Check already-available data first (no network cost)
   const avPE = parseFloat(avData?.PERatio);
   if (!isNaN(avPE) && avPE>0 && avPE<600) return avPE;
  
-  // 2. Finnhub metric
   const fhPE = fhMetric?.peBasicExclExtraTTM || fhMetric?.peTTM;
   if (fhPE>0 && fhPE<600) return fhPE;
  
-  // 3. Yahoo chart meta (from already-fetched data)
   const yhPE = yahooChartData?.chart?.result?.[0]?.meta?.trailingPE;
   if (yhPE>0 && yhPE<600) return yhPE;
  
-  // 4. Yahoo summaryDetail
-  try {
-    const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`, crumbInfo);
-    const pe = j?.quoteSummary?.result?.[0]?.summaryDetail?.trailingPE?.raw;
-    if (pe>0 && pe<600) return pe;
-  } catch (_) {}
+  const saPE = saExtract(saData, ['pe','peRatio','priceEarnings','trailingPE','forwardPE']);
+  if (saPE>0 && saPE<600) return saPE;
  
-  // 5. stockanalysis.com
-  try {
-    const sa = await fetchStockAnalysis(ticker);
-    const pe = saExtract(sa, ['pe','peRatio','priceEarnings','trailingPE','forwardPE']);
-    if (pe>0 && pe<600) return pe;
-  } catch (_) {}
+  const mwPE = mwExtractPE(mwData);
+  if (mwPE>0 && mwPE<600) return mwPE;
  
-  // 6. MarketWatch
-  try {
-    const mw = await fetchMarketWatch(ticker);
-    const pe = mwExtractPE(mw);
-    if (pe>0 && pe<600) return pe;
-  } catch (_) {}
+  const zPE = zacksExtractPE(zacksHtml);
+  if (zPE>0 && zPE<600) return zPE;
  
-  // 7. Zacks
-  try {
-    const html = await fetchZacks(ticker);
-    const pe = zacksExtractPE(html);
-    if (pe>0 && pe<600) return pe;
-  } catch (_) {}
- 
-  return null;
+  // Race Yahoo API sources in parallel
+  return raceValid([
+    async () => {
+      const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`, crumbInfo);
+      const pe = j?.quoteSummary?.result?.[0]?.summaryDetail?.trailingPE?.raw;
+      return (pe>0 && pe<600) ? pe : null;
+    },
+  ], v => v != null && v > 0 && v < 600);
 }
  
-// ── S5: Analyst target ─────────────────────────────────────────────────────────
-async function resolveTarget(ticker, avData, crumbInfo) {
-  // 1. Alpha Vantage AnalystTargetPrice
+// ── Analyst target ─────────────────────────────────────────────────────────────
+async function resolveTarget(ticker, avData, crumbInfo, saData, zacksHtml) {
+  // Check already-available data first
   const avT = parseFloat(avData?.AnalystTargetPrice);
   if (!isNaN(avT) && avT>0) return avT;
  
-  // 2. Finnhub /stock/price-target (works on free tier)
-  try {
-    const d = await fh(`/stock/price-target?symbol=${ticker}`);
-    const t = d?.targetMedian || d?.targetMean;
-    if (t>0) return t;
-  } catch (_) {}
+  const zT = zacksExtractTarget(zacksHtml);
+  if (zT>0) return zT;
  
-  // 3. Yahoo financialData
-  try {
-    const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=financialData`, crumbInfo);
-    const fd = j?.quoteSummary?.result?.[0]?.financialData;
-    const t = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
-    if (t>0) return t;
-  } catch (_) {}
- 
-  // 4. stockanalysis.com analyst data
-  try {
-    const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`);
-    // Look for price target in Next.js data
-    const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (m) {
-      const d    = JSON.parse(m[1]);
-      const ppts = d?.props?.pageProps;
-      const t    = ppts?.data?.priceTarget || ppts?.priceTarget ||
-                   saExtract(ppts, ['data.priceTarget','data.targetPrice','data.analystTarget','priceTarget']);
-      if (t>0) return t;
-    }
-    // Regex fallback on the HTML
-    for (const p of [
-      /price\s+target[^$<]*\$\s*([\d,]+\.?\d*)/i,
-      /consensus[^$<]*\$\s*([\d,]+\.?\d*)/i,
-      /target\s+price[^$<]*\$\s*([\d,]+\.?\d*)/i,
-      /analyst.*?target.*?\$([\d,]+\.?\d*)/i,
-    ]) {
-      const match = html.match(p);
-      if (match) { const v=parseFloat(match[1].replace(/,/g,'')); if (v>0 && v<100000) return v; }
-    }
-  } catch (_) {}
- 
-  // 5. Zacks price target
-  try {
-    const html = await fetchZacks(ticker);
-    const t = zacksExtractTarget(html);
-    if (t>0) return t;
-  } catch (_) {}
- 
-  // 6. MarketWatch analyst section
-  try {
-    const html = await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}/analystestimates`);
-    for (const p of [/target\s*price[^$<]*\$\s*([\d,]+\.?\d*)/i, /mean\s*target[^$<]*\$\s*([\d,]+\.?\d*)/i]) {
-      const m = html.match(p);
-      if (m) { const v=parseFloat(m[1].replace(/,/g,'')); if (v>0) return v; }
-    }
-  } catch (_) {}
- 
-  return null;
+  // Race remaining sources in parallel
+  return raceValid([
+    async () => {
+      const d = await fh(`/stock/price-target?symbol=${ticker}`);
+      const t = d?.targetMedian || d?.targetMean;
+      return t>0 ? t : null;
+    },
+    async () => {
+      const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=financialData`, crumbInfo);
+      const fd = j?.quoteSummary?.result?.[0]?.financialData;
+      const t = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
+      return t>0 ? t : null;
+    },
+    async () => {
+      const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`);
+      const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (m) {
+        const d = JSON.parse(m[1]);
+        const ppts = d?.props?.pageProps;
+        const t = ppts?.data?.priceTarget || ppts?.priceTarget;
+        if (t>0) return t;
+      }
+      for (const p of [/price\s+target[^$<]*\$\s*([\d,]+\.?\d*)/i, /consensus[^$<]*\$\s*([\d,]+\.?\d*)/i, /target\s+price[^$<]*\$\s*([\d,]+\.?\d*)/i]) {
+        const match = html.match(p);
+        if (match) { const v=parseFloat(match[1].replace(/,/g,'')); if (v>0 && v<100000) return v; }
+      }
+      return null;
+    },
+    async () => {
+      const html = await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}/analystestimates`);
+      for (const p of [/target\s*price[^$<]*\$\s*([\d,]+\.?\d*)/i, /mean\s*target[^$<]*\$\s*([\d,]+\.?\d*)/i]) {
+        const m = html.match(p);
+        if (m) { const v=parseFloat(m[1].replace(/,/g,'')); if (v>0) return v; }
+      }
+      return null;
+    },
+  ], v => v != null && v > 0);
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
@@ -654,7 +543,6 @@ function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
   let lo = fhMetric?.['52WeekLow']  || parseFloat(avData?.['52WeekLow'])  || yahooChartMeta?.fiftyTwoWeekLow  || null;
   if (isNaN(hi)) hi=null;
   if (isNaN(lo)) lo=null;
-  // Fallback: compute from closes
   if ((!hi||!lo) && yahooChartCloses.length>50) {
     if (!hi) hi=Math.max(...yahooChartCloses);
     if (!lo) lo=Math.min(...yahooChartCloses);
@@ -672,19 +560,23 @@ async function resolveInsider(ticker, curPx) {
   const to    = new Date(now*1000).toISOString().slice(0,10);
   const cut   = new Date(ago30*1000);
  
-  try {
-    const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
-    const txns = d?.data||[];
-    const buys=txns.filter(t=>t.transactionCode==='P'), sells=txns.filter(t=>t.transactionCode==='S');
-    if (buys.length>0||sells.length>0) return { buys,sells,source:'finnhub' };
-  } catch (_) {}
- 
-  try {
-    const r = await fetch(
-      `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
-      { headers:{ 'User-Agent':'Mozilla/5.0' }, signal:AbortSignal.timeout(7000) }
-    );
-    if (r.ok) {
+  // Race Finnhub and OpenInsider in parallel
+  const results = await Promise.allSettled([
+    // Finnhub
+    (async () => {
+      const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
+      const txns = d?.data||[];
+      const buys=txns.filter(t=>t.transactionCode==='P'), sells=txns.filter(t=>t.transactionCode==='S');
+      if (buys.length>0||sells.length>0) return { buys, sells, source:'finnhub' };
+      return null;
+    })(),
+    // OpenInsider
+    (async () => {
+      const r = await fetch(
+        `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
+        { headers:{ 'User-Agent':'Mozilla/5.0' }, signal:AbortSignal.timeout(5000) }
+      );
+      if (!r.ok) return null;
       const html=await r.text(), rows=[...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
       const buys=[],sells=[];
       for (const row of rows) {
@@ -701,9 +593,13 @@ async function resolveInsider(ticker, curPx) {
         else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
       }
       if (buys.length>0||sells.length>0) return {buys,sells,source:'openinsider'};
-    }
-  } catch (_) {}
+      return null;
+    })(),
+  ]);
  
+  for (const r of results) {
+    if (r.status==='fulfilled' && r.value) return r.value;
+  }
   return { buys:[], sells:[], source:null };
 }
  
@@ -771,40 +667,29 @@ const _pePeerCache = {};
 async function getPeerPE(peer, crumbInfo) {
   if (_pePeerCache[peer]) return _pePeerCache[peer];
  
-  // 1. Yahoo chart meta — fastest
-  try {
-    const j = await yahooFetch(`/v8/finance/chart/${peer}?interval=1d&range=5d`, crumbInfo);
-    const pe = j?.chart?.result?.[0]?.meta?.trailingPE;
-    const mc = j?.chart?.result?.[0]?.meta?.marketCap||0;
-    if (pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
-  } catch (_) {}
- 
-  // 2. Finnhub metric
-  try {
-    const d = await fh(`/stock/metric?symbol=${peer}&metric=all`);
-    const pe = d?.metric?.peBasicExclExtraTTM || d?.metric?.peTTM;
-    const mc = (d?.metric?.marketCapitalization||0)*1e6;
-    if (pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
-  } catch (_) {}
- 
-  // 3. Alpha Vantage (if key available)
-  if (AV_KEY) {
-    try {
+  // Race all sources in parallel
+  const result = await raceValid([
+    async () => {
+      const j = await yahooFetch(`/v8/finance/chart/${peer}?interval=1d&range=5d`, crumbInfo);
+      const pe = j?.chart?.result?.[0]?.meta?.trailingPE;
+      const mc = j?.chart?.result?.[0]?.meta?.marketCap||0;
+      return (pe>0 && pe<600) ? { ticker:peer, pe, mc } : null;
+    },
+    async () => {
+      const d = await fh(`/stock/metric?symbol=${peer}&metric=all`);
+      const pe = d?.metric?.peBasicExclExtraTTM || d?.metric?.peTTM;
+      const mc = (d?.metric?.marketCapitalization||0)*1e6;
+      return (pe>0 && pe<600) ? { ticker:peer, pe, mc } : null;
+    },
+    ...(AV_KEY ? [async () => {
       const d = await fetchAV(peer);
       const pe = parseFloat(d?.PERatio);
       const mc = parseFloat(d?.MarketCapitalization)||0;
-      if (!isNaN(pe) && pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
-    } catch (_) {}
-  }
+      return (!isNaN(pe) && pe>0 && pe<600) ? { ticker:peer, pe, mc } : null;
+    }] : []),
+  ], v => v != null && v.pe > 0);
  
-  // 4. stockanalysis.com
-  try {
-    const sa  = await fetchStockAnalysis(peer);
-    const pe  = saExtract(sa,['pe','peRatio','trailingPE']);
-    const mc  = saExtract(sa,['marketCap','marketCapitalization'])||0;
-    if (pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
-  } catch (_) {}
- 
+  if (result) { _pePeerCache[peer] = result; return result; }
   return null;
 }
  
@@ -816,13 +701,9 @@ async function resolvePeerPE(ticker, curPE, targetMC, crumbInfo) {
     peerList=peerList.slice(0,10);
     if (!peerList.length) return null;
  
-    // Batch in 2s to avoid rate limits
-    const all=[];
-    for (let i=0;i<peerList.length;i+=2) {
-      const batch=peerList.slice(i,i+2);
-      const res=await Promise.allSettled(batch.map(p=>getPeerPE(p,crumbInfo)));
-      all.push(...res.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value));
-    }
+    // Fetch all peers in parallel (was batched in groups of 2 — unnecessary throttle)
+    const all = (await Promise.allSettled(peerList.map(p=>getPeerPE(p,crumbInfo))))
+      .filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value);
     if (!all.length) return null;
  
     let comps=all;
@@ -871,32 +752,43 @@ function cleanExchange(raw){
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Master fetch
+// Master fetch — scraper pages fetched ONCE, shared across all resolvers
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchStockData(ticker, crumbInfo) {
-  // Fire Finnhub primaries + AV + Yahoo chart all simultaneously
-  const [quoteR, profileR, metricsR, earningsR, yhChartR, avR] = await Promise.allSettled([
+  // Fire all primary sources simultaneously
+  const [quoteR, profileR, metricsR, earningsR, yhChartR, avR,
+         saR, mwR, zacksR] = await Promise.allSettled([
     fh(`/quote?symbol=${ticker}`),
     fh(`/stock/profile2?symbol=${ticker}`),
     fh(`/stock/metric?symbol=${ticker}&metric=all`),
     fh(`/stock/earnings?symbol=${ticker}&limit=4`),
     yahooFetch(`/v8/finance/chart/${ticker}?interval=1d&range=1y`, crumbInfo),
     fetchAV(ticker),
+    // ↓ Page scrapers fired upfront — results shared across ALL signal resolvers
+    //   Previously each resolver independently fetched these (3× the network cost)
+    fetchStockAnalysis(ticker),
+    fetchMarketWatch(ticker),
+    fetchZacks(ticker),
   ]);
  
-  const curPx  = quoteR.status==='fulfilled'   ? quoteR.value?.c             : null;
-  const fhM    = metricsR.status==='fulfilled' ? metricsR.value?.metric||{}  : {};
-  const avData = avR.status==='fulfilled'       ? avR.value                   : null;
-  const yhChart = yhChartR.status==='fulfilled' ? yhChartR.value              : null;
+  const curPx   = quoteR.status==='fulfilled'   ? quoteR.value?.c            : null;
+  const fhM     = metricsR.status==='fulfilled' ? metricsR.value?.metric||{} : {};
+  const avData  = avR.status==='fulfilled'       ? avR.value                  : null;
+  const yhChart = yhChartR.status==='fulfilled'  ? yhChartR.value             : null;
   const yhMeta  = yhChart?.chart?.result?.[0]?.meta||{};
   const yhClose = yhChart?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
  
-  // All signal data in parallel
+  // Pre-fetched scraper data — passed directly into resolvers, zero extra fetches
+  const saData   = saR.status==='fulfilled'    ? saR.value    : null;
+  const mwData   = mwR.status==='fulfilled'    ? mwR.value    : null;
+  const zacksHtml = zacksR.status==='fulfilled' ? zacksR.value : null;
+ 
+  // All signal resolvers run in parallel, each using pre-fetched scraper data
   const [eps, ma50, curPE, analystTarget, insiderData] = await Promise.all([
-    resolveEPS(ticker, avData, fhM, crumbInfo),
+    resolveEPS(ticker, avData, fhM, crumbInfo, saData, mwData, zacksHtml),
     resolveMA50(ticker, avData, crumbInfo, yhChart),
-    resolvePE(ticker, avData, fhM, crumbInfo, yhChart),
-    resolveTarget(ticker, avData, crumbInfo),
+    resolvePE(ticker, avData, fhM, crumbInfo, yhChart, saData, mwData, zacksHtml),
+    resolveTarget(ticker, avData, crumbInfo, saData, zacksHtml),
     resolveInsider(ticker, curPx),
   ]);
  
@@ -912,7 +804,7 @@ async function fetchStockData(ticker, crumbInfo) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Evaluate
+// Evaluate — unchanged from v6
 // ─────────────────────────────────────────────────────────────────────────────
 function evaluate(ticker, d) {
   const q=d.quote||{}, p=d.profile||{};
@@ -1017,11 +909,8 @@ export default async function handler(req, res) {
  
   // Clear per-request caches
   Object.keys(_avCache).forEach(k=>delete _avCache[k]);
-  Object.keys(_saCache).forEach(k=>delete _saCache[k]);
-  Object.keys(_mwCache).forEach(k=>delete _mwCache[k]);
   Object.keys(_pePeerCache).forEach(k=>delete _pePeerCache[k]);
  
-  // Fetch crumb ONCE for whole batch
   const crumbInfo = await getYahooCrumb();
  
   const results={};
