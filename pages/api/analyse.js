@@ -1,12 +1,19 @@
 // pages/api/analyse.js
-// All 6-signal analysis. Called by the custom scan (POST from browser)
-// and by top3.js (POST from browser after /api/top3 returns candidates).
+// Restored from last known working version.
+// Key fixes on top of the working base:
+//   1. exchange field added to output (needed by index.js feature cards)
+//   2. fetch50dMA: Finnhub candle first (unchanged), Yahoo fallback now uses
+//      full browser headers so Vercel doesn't get 403s
+//   3. fetchAnalystTarget: Finnhub /stock/price-target added as primary source
+//      (free tier, reliable), Yahoo + Stockanalysis as fallbacks
+//   4. fetchPeerPE: peer PE now fetched from Yahoo chart meta in parallel
+//      (avoids Finnhub rate limits from 20 simultaneous /stock/metric calls)
  
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
 const FH = 'https://finnhub.io/api/v1';
  
-// Full browser headers — Yahoo 403s without these on server-side requests
-const YH = {
+// Full browser headers — required for Yahoo Finance on Vercel (server-side)
+const YH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -14,353 +21,454 @@ const YH = {
   'Referer': 'https://finance.yahoo.com/',
 };
  
-// ── Core fetch helpers ────────────────────────────────────────────────────────
- 
+// ── Finnhub fetch ─────────────────────────────────────────────────────────────
 async function fh(path) {
   const sep = path.includes('?') ? '&' : '?';
-  const r = await fetch(`${FH}${path}${sep}token=${FINNHUB_KEY}`, {
+  const res = await fetch(`${FH}${path}${sep}token=${FINNHUB_KEY}`, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
     signal: AbortSignal.timeout(8000),
   });
-  if (!r.ok) throw new Error(`Finnhub ${r.status}`);
-  const d = await r.json();
-  if (d?.error) throw new Error(d.error);
-  return d;
-}
- 
-// Yahoo chart — fastest source, returns price + PE + 52w + closes
-async function yahooChart(ticker, range = '1y') {
-  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
-    try {
-      const r = await fetch(
-        `${base}/v8/finance/chart/${ticker}?interval=1d&range=${range}`,
-        { headers: YH, signal: AbortSignal.timeout(7000) }
-      );
-      if (!r.ok) continue;
-      const j = await r.json();
-      const res = j?.chart?.result?.[0];
-      if (res) return res;
-    } catch (_) {}
-  }
-  return null;
-}
- 
-// Yahoo quoteSummary — one shot, fastest domain first, no sequential retries
-async function yahooModule(ticker, mod) {
-  for (const url of [
-    `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${ticker}?modules=${mod}`,
-    `https://query2.finance.yahoo.com/v11/finance/quoteSummary/${ticker}?modules=${mod}`,
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=${mod}`,
-  ]) {
-    try {
-      const r = await fetch(url, { headers: YH, signal: AbortSignal.timeout(6000) });
-      if (!r.ok) continue;
-      const j = await r.json();
-      const result = j?.quoteSummary?.result?.[0];
-      if (result) return result;
-    } catch (_) {}
-  }
-  return null;
+  if (!res.ok) throw new Error(`Finnhub HTTP ${res.status}`);
+  const data = await res.json();
+  if (data?.error) throw new Error(data.error);
+  return data;
 }
  
 // ── Format helpers ────────────────────────────────────────────────────────────
- 
 function fmtShares(n) {
-  if (!n || n <= 0) return null;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M shares`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K shares`;
-  return `${Math.round(n).toLocaleString()} shares`;
+  if (!n || n === 0) return null;
+  if (n >= 1e6) return `${(n/1e6).toFixed(2)}M shares`;
+  if (n >= 1e3) return `${(n/1e3).toFixed(1)}K shares`;
+  return `${n.toLocaleString()} shares`;
 }
 function fmtDollars(n) {
-  if (!n || n <= 0) return null;
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
-  return `$${Math.round(n)}`;
+  if (!n || n === 0) return null;
+  if (n >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `$${(n/1e3).toFixed(0)}K`;
+  return `$${n.toFixed(0)}`;
 }
 function timeAgo(dateStr) {
   if (!dateStr) return null;
-  const days = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
   if (days === 0) return 'today';
   if (days === 1) return '1d ago';
-  if (days < 7)  return `${days}d ago`;
-  if (days < 14) return '1w ago';
-  if (days < 30) return `${Math.floor(days / 7)}w ago`;
-  return `${Math.floor(days / 30)}mo ago`;
+  if (days < 7)   return `${days}d ago`;
+  if (days < 14)  return '1w ago';
+  if (days < 30)  return `${Math.floor(days/7)}w ago`;
+  return `${Math.floor(days/30)}mo ago`;
 }
+ 
+// ── 50d MA ────────────────────────────────────────────────────────────────────
 function maFromCloses(closes) {
   if (!Array.isArray(closes) || closes.length < 10) return null;
-  const s = closes.slice(-50);
-  return s.reduce((a, b) => a + b, 0) / s.length;
+  const slice = closes.slice(-50);
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
  
-// ── Hardcoded peer map — guarantees peer PE even when APIs return nothing ─────
-const PEERS = {
-  AAPL: ['MSFT','GOOGL','META','AMZN','NVDA','SONY'],
-  MSFT: ['AAPL','GOOGL','CRM','ORCL','SAP','IBM'],
-  GOOGL:['META','MSFT','AMZN','SNAP','TTD','PINS'],
-  AMZN: ['MSFT','GOOGL','BABA','WMT','COST','TGT'],
-  META: ['GOOGL','SNAP','PINS','RDDT','TTD'],
-  NVDA: ['AMD','INTC','QCOM','AVGO','TXN','MU'],
-  TSLA: ['F','GM','RIVN','NIO','STLA','TM'],
-  AVGO: ['QCOM','TXN','INTC','ADI','MRVL','AMD'],
-  ORCL: ['SAP','MSFT','CRM','IBM','WDAY','NOW'],
-  AMD:  ['NVDA','INTC','QCOM','TXN','MU','AVGO'],
-  INTC: ['AMD','NVDA','QCOM','TXN','AVGO','MRVL'],
-  QCOM: ['AVGO','TXN','ADI','MRVL','AMD','INTC'],
-  JPM:  ['BAC','WFC','C','GS','MS','USB'],
-  BAC:  ['JPM','WFC','C','USB','PNC','TFC'],
-  WFC:  ['JPM','BAC','C','USB','PNC','COF'],
-  GS:   ['MS','JPM','C','BLK','SCHW','RJF'],
-  MS:   ['GS','JPM','C','BLK','SCHW','UBS'],
-  BLK:  ['SCHW','MS','GS','IVZ','AMG','BEN'],
-  LLY:  ['NVO','PFE','MRK','ABBV','BMY','REGN'],
-  JNJ:  ['PFE','ABBV','MRK','TMO','ABT','MDT'],
-  UNH:  ['CVS','CI','HUM','ELV','CNC','MOH'],
-  ABBV: ['PFE','LLY','MRK','BMY','REGN','BIIB'],
-  MRK:  ['PFE','JNJ','ABBV','LLY','BMY','NVO'],
-  PFE:  ['MRK','JNJ','ABBV','BMY','LLY','AZN'],
-  XOM:  ['CVX','COP','SLB','EOG','OXY','BP'],
-  CVX:  ['XOM','COP','SLB','EOG','DVN','OXY'],
-  COP:  ['EOG','XOM','CVX','DVN','OXY','HES'],
-  HD:   ['LOW','WMT','TGT','COST','AMZN','TJX'],
-  WMT:  ['TGT','COST','KR','HD','AMZN','DG'],
-  MCD:  ['YUM','CMG','QSR','DRI','SHAK','WEN'],
-  NKE:  ['ADDYY','PUMA','UAA','DECK','LULU','SKX'],
-  KO:   ['PEP','MDLZ','MNST','KHC','TAP','STZ'],
-  PEP:  ['KO','MDLZ','MNST','KHC','TAP','STZ'],
-  PM:   ['MO','BTI','IMBBY','VGR','UVV'],
-  MO:   ['PM','BTI','IMBBY','VGR'],
-  T:    ['VZ','TMUS','CMCSA','CHTR','LUMN'],
-  VZ:   ['T','TMUS','CMCSA','CHTR','LUMN'],
-  TMUS: ['T','VZ','CMCSA','CHTR'],
-  CAT:  ['DE','HON','EMR','ITW','PH','ROK'],
-  DE:   ['CAT','AGCO','CNH','HON','EMR'],
-  HON:  ['CAT','EMR','ITW','ROK','PH','ETN'],
-  NEE:  ['DUK','SO','AEP','EXC','D','XEL'],
-  AMT:  ['PLD','EQIX','CCI','SPG','O','VICI'],
-  TMO:  ['DHR','A','WAT','BIO','IDXX','MTD'],
-  COST: ['WMT','TGT','BJ','SFM','CASY'],
-  SBUX: ['MCD','CMG','YUM','QSR','DRI'],
-  IBM:  ['MSFT','ORCL','HPE','DXC','LDOS'],
-};
- 
-// ── Signal data fetchers ──────────────────────────────────────────────────────
- 
-async function fetchAllYahooData(ticker) {
-  // Fire chart (gives us price, PE, 52w, closes for MA) and summary in parallel
-  const [chartResult, summaryResult] = await Promise.allSettled([
-    yahooChart(ticker, '1y'),
-    yahooModule(ticker, 'summaryDetail,defaultKeyStatistics,financialData,earningsTrend'),
-  ]);
- 
-  const chart   = chartResult.status   === 'fulfilled' ? chartResult.value   : null;
-  const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
- 
-  const meta   = chart?.meta || {};
-  const closes = chart?.indicators?.quote?.[0]?.close?.filter(c => c != null && !isNaN(c)) || [];
-  const sd     = summary?.summaryDetail      || {};
-  const ks     = summary?.defaultKeyStatistics || {};
-  const fd     = summary?.financialData      || {};
-  const et     = summary?.earningsTrend      || {};
- 
-  // Price
-  const price = meta.regularMarketPrice || null;
- 
-  // PE ratio — from chart meta first, then summaryDetail, then defaultKeyStatistics
-  const pe = (meta.trailingPE && meta.trailingPE > 0 && meta.trailingPE < 2000)
-    ? meta.trailingPE
-    : (sd.trailingPE?.raw && sd.trailingPE.raw > 0 ? sd.trailingPE.raw : null)
-    ?? (ks.trailingPE?.raw && ks.trailingPE.raw > 0 ? ks.trailingPE.raw : null);
- 
-  // EPS (trailing twelve months)
-  const eps = ks.trailingEps?.raw || null;
- 
-  // 52w hi/lo — chart meta first, then summaryDetail
-  const hi52 = meta.fiftyTwoWeekHigh || sd.fiftyTwoWeekHigh?.raw
-    || (closes.length > 0 ? Math.max(...closes) : null);
-  const lo52 = meta.fiftyTwoWeekLow  || sd.fiftyTwoWeekLow?.raw
-    || (closes.length > 0 ? Math.min(...closes) : null);
- 
-  // 50d MA from closes
-  const ma50 = maFromCloses(closes);
- 
-  // Market cap
-  const marketCap = meta.marketCap || sd.marketCap?.raw || 0;
- 
-  // Analyst target — financialData
-  const analystTarget = fd.targetMedianPrice?.raw || fd.targetMeanPrice?.raw || null;
- 
-  // EPS beat from earningsTrend (most recent quarter actual vs estimate)
-  let epsBeat = null;
+async function fetch50dMA(ticker) {
+  // Source 1: Finnhub candle (unchanged from working version)
   try {
-    const trends = et.trend || [];
-    const q = trends.find(t => t.period === '0q') || trends[0];
-    if (q?.earningsEstimate?.avg?.raw != null && q?.revenueEstimate?.avg?.raw != null) {
-      // earningsTrend doesn't give actuals; use ks for last actual
-      const lastActual = ks.mostRecentQuarter?.raw ? null : null; // not reliable here
+    const d = await fh(`/stock/candle?symbol=${ticker}&resolution=D&count=60`);
+    if (d?.s === 'ok' && Array.isArray(d.c) && d.c.length >= 10) {
+      const ma = maFromCloses(d.c);
+      if (ma > 0) return ma;
     }
   } catch (_) {}
  
-  // Day change %
-  const dayChange = meta.regularMarketChangePercent ?? null;
+  // Source 2: Yahoo Finance — now with full browser headers (fixes Vercel 403s)
+  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const r = await fetch(
+        `${base}/v8/finance/chart/${ticker}?interval=1d&period1=${now - 100 * 86400}&period2=${now}`,
+        { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close
+          ?.filter(c => c != null && !isNaN(c));
+        const ma = maFromCloses(closes);
+        if (ma > 0) return ma;
+      }
+    } catch (_) {}
+  }
  
-  // Exchange
-  const exchange = meta.exchangeName || meta.fullExchangeName || '';
- 
-  return { price, pe, eps, hi52, lo52, ma50, marketCap, analystTarget, dayChange, exchange, closes };
+  return null;
 }
  
-async function fetchFinnhubData(ticker) {
-  const [quote, profile, metrics, earnings] = await Promise.allSettled([
-    fh(`/quote?symbol=${ticker}`),
-    fh(`/stock/profile2?symbol=${ticker}`),
-    fh(`/stock/metric?symbol=${ticker}&metric=all`),
-    fh(`/stock/earnings?symbol=${ticker}&limit=4`),
-  ]);
-  return {
-    quote:    quote.status    === 'fulfilled' ? quote.value    : null,
-    profile:  profile.status  === 'fulfilled' ? profile.value  : null,
-    metrics:  metrics.status  === 'fulfilled' ? metrics.value  : null,
-    earnings: earnings.status === 'fulfilled' ? earnings.value : null,
-  };
+// ── Analyst target ────────────────────────────────────────────────────────────
+async function fetchAnalystTarget(ticker) {
+  // Source 1: Finnhub price target (added — free tier, most reliable on Vercel)
+  try {
+    const d = await fh(`/stock/price-target?symbol=${ticker}`);
+    const t = d?.targetMedian || d?.targetMean;
+    if (t && t > 0) return t;
+  } catch (_) {}
+ 
+  // Source 2: Yahoo financialData v10 (from working version)
+  try {
+    const r = await fetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData`,
+      { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const j  = await r.json();
+      const fd = j?.quoteSummary?.result?.[0]?.financialData;
+      const t  = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
+      if (t > 0) return t;
+    }
+  } catch (_) {}
+ 
+  // Source 3: Yahoo financialData v11 fallback
+  try {
+    const r = await fetch(
+      `https://query1.finance.yahoo.com/v11/finance/quoteSummary/${ticker}?modules=financialData`,
+      { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const j  = await r.json();
+      const fd = j?.quoteSummary?.result?.[0]?.financialData;
+      const t  = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
+      if (t > 0) return t;
+    }
+  } catch (_) {}
+ 
+  // Source 4: query2 domain
+  try {
+    const r = await fetch(
+      `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData`,
+      { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const j  = await r.json();
+      const fd = j?.quoteSummary?.result?.[0]?.financialData;
+      const t  = fd?.targetMedianPrice?.raw || fd?.targetMeanPrice?.raw;
+      if (t > 0) return t;
+    }
+  } catch (_) {}
+ 
+  // Source 5: Stockanalysis scrape (from working version)
+  try {
+    const r = await fetch(
+      `https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(6000) }
+    );
+    if (r.ok) {
+      const html = await r.text();
+      for (const pattern of [
+        /price\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
+        /consensus[^$]*\$\s*([\d,]+\.?\d*)/i,
+        /mean\s+target[^$]*\$\s*([\d,]+\.?\d*)/i,
+      ]) {
+        const m = html.match(pattern);
+        if (m) {
+          const v = parseFloat(m[1].replace(/,/g, ''));
+          if (v > 0 && v < 100000) return v;
+        }
+      }
+    }
+  } catch (_) {}
+ 
+  return null;
 }
  
+// ── Insider transactions — 4 sources (unchanged from working version) ──────────
 async function fetchInsiderTransactions(ticker, curPx) {
-  const cutoff = new Date(Date.now() - 60 * 86400000);
+  const now    = Math.floor(Date.now() / 1000);
+  const ago30  = now - 30 * 86400;
+  const from30 = new Date(ago30 * 1000).toISOString().slice(0, 10);
+  const to30   = new Date(now * 1000).toISOString().slice(0, 10);
+  const cutoff = new Date(ago30 * 1000);
  
-  // Yahoo insider transactions
+  // Source 1: Finnhub
   try {
-    const result = await yahooModule(ticker, 'insiderTransactions');
-    const txns = result?.insiderTransactions?.transactions || [];
-    const buys = [], sells = [];
-    for (const t of txns) {
-      const ts = t.startDate?.raw;
-      if (!ts || new Date(ts * 1000) < cutoff) continue;
-      const ds  = new Date(ts * 1000).toISOString().slice(0, 10);
-      const sh  = Math.abs(t.shares?.raw || 0);
-      const val = Math.abs(t.value?.raw  || 0);
-      const desc = (t.transactionDescription || '').toLowerCase();
-      const entry = { transactionDate: ds, share: sh, value: val,
-        transactionPrice: sh > 0 ? val / sh : curPx };
-      if (/purchase|buy/i.test(desc))      buys.push(entry);
-      else if (/sale|sell/i.test(desc))    sells.push(entry);
+    const d    = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from30}&to=${to30}`);
+    const txns = d?.data || [];
+    if (txns.length > 0) {
+      const buys  = txns.filter(t => t.transactionCode === 'P');
+      const sells = txns.filter(t => t.transactionCode === 'S');
+      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'finnhub' };
     }
-    if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'yahoo' };
   } catch (_) {}
  
-  // Finnhub fallback
+  // Source 2: OpenInsider
   try {
-    const from = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
-    const to   = new Date().toISOString().slice(0, 10);
-    const d    = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
-    const txns = d?.data || [];
-    const buys  = txns.filter(t => t.transactionCode === 'P');
-    const sells = txns.filter(t => t.transactionCode === 'S');
-    if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'finnhub' };
+    const r = await fetch(
+      `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const html  = await r.text();
+      const rows  = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
+      const buys  = [], sells = [];
+      for (const row of rows) {
+        const cells = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
+        if (cells.length < 10) continue;
+        const [, dateStr, , , type, , , , sharesRaw, valueRaw] = cells;
+        if (!dateStr || !type) continue;
+        const txDate = new Date(dateStr);
+        if (isNaN(txDate) || txDate < cutoff) continue;
+        const shares = parseInt((sharesRaw || '').replace(/[^0-9]/g, '')) || 0;
+        const value  = parseInt((valueRaw  || '').replace(/[^0-9]/g, '')) || 0;
+        const entry  = { transactionDate: dateStr, share: shares, value,
+          transactionPrice: shares > 0 ? value / shares : curPx };
+        if (/P\s*-\s*Purchase/i.test(type)) buys.push(entry);
+        else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
+      }
+      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'openinsider' };
+    }
+  } catch (_) {}
+ 
+  // Source 3: Yahoo Finance
+  try {
+    const r = await fetch(
+      `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=insiderTransactions`,
+      { headers: YH_HEADERS, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const j    = await r.json();
+      const txns = j?.quoteSummary?.result?.[0]?.insiderTransactions?.transactions || [];
+      const buys = [], sells = [];
+      for (const t of txns) {
+        const dateTs = t.startDate?.raw;
+        if (!dateTs) continue;
+        const txDate  = new Date(dateTs * 1000);
+        if (txDate < cutoff) continue;
+        const dateStr = txDate.toISOString().slice(0, 10);
+        const shares  = Math.abs(t.shares?.raw || 0);
+        const value   = Math.abs(t.value?.raw || 0);
+        const desc    = (t.transactionDescription || '').toLowerCase();
+        const entry   = { transactionDate: dateStr, share: shares, value,
+          transactionPrice: shares > 0 ? value / shares : curPx };
+        if (/purchase|buy/i.test(desc)) buys.push(entry);
+        else if (/sale|sell/i.test(desc)) sells.push(entry);
+      }
+      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'yahoo' };
+    }
+  } catch (_) {}
+ 
+  // Source 4: SEC EDGAR Form 4
+  try {
+    const r = await fetch(
+      `https://efts.sec.gov/LATEST/search-index?q=%22${ticker}%22&dateRange=custom&startdt=${from30}&enddt=${to30}&forms=4`,
+      { headers: { 'User-Agent': 'signal-engine/1.0' }, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const j    = await r.json();
+      const hits = j?.hits?.hits || [];
+      const buys = [];
+      for (const hit of hits.slice(0, 10)) {
+        const src     = hit._source || {};
+        const dateStr = src.file_date || src.period_of_report;
+        if (!dateStr) continue;
+        const txDate  = new Date(dateStr);
+        if (isNaN(txDate) || txDate < cutoff) continue;
+        if ((src.form_type || '').toUpperCase() !== '4') continue;
+        buys.push({ transactionDate: dateStr, share: 0, value: 0, transactionPrice: curPx });
+      }
+      if (buys.length > 0) return { buys, sells: [], source: 'sec' };
+    }
   } catch (_) {}
  
   return { buys: [], sells: [], source: null };
 }
  
-function buildInsiderValue(buys, sells) {
+// ── Insider signal builder (unchanged from working version) ───────────────────
+function buildInsiderValue(buys, sells, source) {
   if (buys.length > 0) {
     const totalShares = buys.reduce((s, t) => s + (t.share || 0), 0);
-    const totalValue  = buys.reduce((s, t) => s + (t.value || (t.share || 0) * (t.transactionPrice || 0)), 0);
-    const parts = [`${buys.length} buy${buys.length > 1 ? 's' : ''}`];
-    const sh = fmtShares(totalShares); if (sh) parts.push(sh);
-    const dl = fmtDollars(totalValue); if (dl) parts.push(dl);
-    const rc = timeAgo(buys.map(t => t.transactionDate).filter(Boolean).sort().reverse()[0]);
-    if (rc) parts.push(rc);
+    const totalValue  = buys.reduce((s, t) => {
+      const v = t.value || Math.abs((t.share || 0) * (t.transactionPrice || 0));
+      return s + v;
+    }, 0);
+    const sharesStr = totalShares > 0 ? fmtShares(totalShares) : null;
+    const dollarStr = totalValue  > 0 ? fmtDollars(totalValue)  : null;
+    const dates     = buys.map(t => t.transactionDate).filter(Boolean).sort().reverse();
+    const recency   = dates[0] ? timeAgo(dates[0]) : null;
+    const parts     = [`${buys.length} buy${buys.length > 1 ? 's' : ''}`];
+    if (sharesStr) parts.push(sharesStr);
+    if (dollarStr) parts.push(dollarStr);
+    if (recency)   parts.push(recency);
     return { status: 'pass', value: parts.join(' · ') };
   }
   if (sells.length > 0) {
-    const recent = sells.filter(s => (Date.now() - new Date(s.transactionDate).getTime()) < 30 * 86400000);
-    const rc = timeAgo(sells.map(t => t.transactionDate).filter(Boolean).sort().reverse()[0]);
-    const parts = [`${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys`];
-    if (rc) parts.push(rc);
-    return { status: recent.length > 0 ? 'fail' : 'neutral', value: parts.join(' · ') };
+    const totalShares = sells.reduce((s, t) => s + (t.share || 0), 0);
+    const totalValue  = sells.reduce((s, t) => {
+      const v = t.value || Math.abs((t.share || 0) * (t.transactionPrice || 0));
+      return s + v;
+    }, 0);
+    const sharesStr = totalShares > 0 ? fmtShares(totalShares) : null;
+    const dollarStr = totalValue  > 0 ? fmtDollars(totalValue)  : null;
+    const dates     = sells.map(t => t.transactionDate).filter(Boolean).sort().reverse();
+    const recency   = dates[0] ? timeAgo(dates[0]) : null;
+    const parts     = [`${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys`];
+    if (sharesStr) parts.push(sharesStr);
+    if (dollarStr) parts.push(dollarStr);
+    if (recency)   parts.push(recency);
+    return { status: 'fail', value: parts.join(' · ') };
   }
-  return { status: 'neutral', value: 'No activity (60d)' };
+  return { status: 'neutral', value: source ? 'No activity (30d)' : 'No data' };
 }
  
-async function fetchPeerPE(ticker, targetPE, targetMC) {
+// ── Peer PE comparison ────────────────────────────────────────────────────────
+// FIX: peer PE now fetched from Yahoo chart meta (fast, parallel, no rate limit)
+// Finnhub /stock/metric used only as fallback per peer to avoid free-tier limits
+async function fetchPeerPE(ticker, targetPE, targetMC, targetMargin) {
   try {
-    // Build peer list: hardcoded map + Yahoo recommendations + Finnhub peers
-    let peers = [...(PEERS[ticker] || [])];
+    let rawPeers = [];
  
-    await Promise.allSettled([
-      // Yahoo recommendations
-      fetch(`https://query1.finance.yahoo.com/v6/finance/recommendationsbysymbol/${ticker}`,
-        { headers: YH, signal: AbortSignal.timeout(5000) })
-        .then(r => r.ok ? r.json() : null)
-        .then(j => {
-          const yp = (j?.finance?.result?.[0]?.recommendedSymbols || []).map(s => s.symbol);
-          peers.push(...yp);
-        }),
-      // Finnhub peers
-      fh(`/stock/peers?symbol=${ticker}`)
-        .then(pd => { if (Array.isArray(pd)) peers.push(...pd.filter(p => p !== ticker)); })
-        .catch(() => {}),
-    ]);
+    // Source A: Finnhub peers
+    try {
+      const pd = await fh(`/stock/peers?symbol=${ticker}`);
+      if (Array.isArray(pd)) rawPeers = pd.filter(p => p !== ticker);
+    } catch (_) {}
  
-    peers = [...new Set(peers)].filter(p => p !== ticker).slice(0, 20);
-    if (peers.length === 0) return null;
+    // Source B: Yahoo recommended symbols
+    try {
+      const r = await fetch(
+        `https://query1.finance.yahoo.com/v6/finance/recommendationsbysymbol/${ticker}`,
+        { headers: YH_HEADERS, signal: AbortSignal.timeout(6000) }
+      );
+      if (r.ok) {
+        const j  = await r.json();
+        const yp = (j?.finance?.result?.[0]?.recommendedSymbols || []).map(s => s.symbol);
+        rawPeers = [...new Set([...rawPeers, ...yp])].filter(p => p !== ticker);
+      }
+    } catch (_) {}
  
-    // Fetch PE for each peer using Yahoo chart (fastest, no API key)
+    // Source C: Hardcoded fallback peers for the most common tickers
+    // Guarantees peer data even when both APIs fail
+    const FALLBACK_PEERS = {
+      AAPL: ['MSFT','GOOGL','META','AMZN','NVDA'],
+      MSFT: ['AAPL','GOOGL','CRM','ORCL','IBM'],
+      GOOGL:['META','MSFT','AMZN','SNAP','TTD'],
+      META: ['GOOGL','SNAP','PINS','TTD','RDDT'],
+      AMZN: ['MSFT','GOOGL','WMT','COST','BABA'],
+      NVDA: ['AMD','INTC','QCOM','AVGO','TXN'],
+      TSLA: ['GM','F','RIVN','NIO','TM'],
+      AVGO: ['QCOM','TXN','ADI','MRVL','AMD'],
+      ORCL: ['SAP','MSFT','CRM','IBM','WDAY'],
+      AMD:  ['NVDA','INTC','QCOM','TXN','MU'],
+      JPM:  ['BAC','WFC','C','GS','MS'],
+      BAC:  ['JPM','WFC','C','USB','PNC'],
+      GS:   ['MS','JPM','C','BLK','SCHW'],
+      LLY:  ['NVO','PFE','MRK','ABBV','BMY'],
+      JNJ:  ['PFE','ABBV','MRK','TMO','ABT'],
+      UNH:  ['CVS','CI','HUM','ELV','CNC'],
+      XOM:  ['CVX','COP','SLB','EOG','OXY'],
+      CVX:  ['XOM','COP','SLB','EOG','DVN'],
+      HD:   ['LOW','WMT','TGT','COST','AMZN'],
+      WMT:  ['TGT','COST','KR','HD','AMZN'],
+      PFE:  ['MRK','JNJ','ABBV','BMY','LLY'],
+      ABBV: ['PFE','LLY','MRK','BMY','REGN'],
+      CAT:  ['DE','HON','EMR','ITW','PH'],
+      T:    ['VZ','TMUS','CMCSA','CHTR'],
+      VZ:   ['T','TMUS','CMCSA','CHTR'],
+      KO:   ['PEP','MDLZ','MNST','KHC'],
+      PEP:  ['KO','MDLZ','MNST','KHC'],
+      MRK:  ['PFE','JNJ','ABBV','LLY','BMY'],
+      IBM:  ['MSFT','ORCL','HPE','DXC','LDOS'],
+      COST: ['WMT','TGT','BJ','SFM','HD'],
+      NEE:  ['DUK','SO','AEP','EXC','D'],
+    };
+    if (FALLBACK_PEERS[ticker]) {
+      rawPeers = [...new Set([...rawPeers, ...FALLBACK_PEERS[ticker]])].filter(p => p !== ticker);
+    }
+ 
+    rawPeers = rawPeers.slice(0, 20);
+    if (rawPeers.length === 0) return null;
+ 
+    // Fetch PE for each peer — Yahoo chart meta primary (fast, parallel, no rate limit)
+    // Finnhub /stock/metric only as fallback per peer
     const peerResults = await Promise.allSettled(
-      peers.map(p =>
-        yahooChart(p, '5d').then(res => {
-          const meta = res?.meta || {};
-          const pe   = meta.trailingPE;
-          const mc   = meta.marketCap || 0;
-          if (pe && pe > 0 && pe < 600) return { ticker: p, pe, mc };
-          return null;
-        }).catch(() => null)
-      )
+      rawPeers.map(async peer => {
+        // Try Yahoo chart first
+        for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
+          try {
+            const r = await fetch(
+              `${base}/v8/finance/chart/${peer}?interval=1d&range=5d`,
+              { headers: YH_HEADERS, signal: AbortSignal.timeout(5000) }
+            );
+            if (r.ok) {
+              const j    = await r.json();
+              const meta = j?.chart?.result?.[0]?.meta;
+              const pe   = meta?.trailingPE;
+              const mc   = meta?.marketCap || 0;
+              if (pe && pe > 0 && pe < 500) return { ticker: peer, pe, mc };
+            }
+          } catch (_) {}
+        }
+        // Fallback: Finnhub metric (uses rate-limited API — only if Yahoo failed)
+        try {
+          const d  = await fh(`/stock/metric?symbol=${peer}&metric=all`);
+          const pm = d?.metric || {};
+          const pe = pm.peBasicExclExtraTTM || pm.peTTM;
+          const mc = (pm.marketCapitalization || 0) * 1e6; // Finnhub gives millions
+          if (pe && pe > 0 && pe < 500) return { ticker: peer, pe, mc };
+        } catch (_) {}
+        return null;
+      })
     );
  
-    let valid = peerResults
+    const all = peerResults
       .filter(r => r.status === 'fulfilled' && r.value)
       .map(r => r.value);
  
-    if (valid.length < 2) return null;
+    if (all.length === 0) return null;
  
-    // Market-cap band filter
-    if (targetMC > 0) {
-      const lo = targetMC > 500e9 ? 0.08 : targetMC > 50e9 ? 0.12 : 0.2;
-      const hi = targetMC > 500e9 ? 10   : targetMC > 50e9 ? 8    : 5;
-      const banded = valid.filter(c => c.mc <= 0 || (c.mc / targetMC >= lo && c.mc / targetMC <= hi));
-      if (banded.length >= 2) valid = banded;
+    // Market cap filter (same logic as working version)
+    // targetMC here is in MILLIONS (from Finnhub metric) — peer mc is in raw dollars
+    // Normalise: convert peer mc from dollars to millions for comparison
+    const targetMC_m = targetMC; // already in millions from Finnhub
+    let loRatio = 0.25, hiRatio = 4;
+    if (targetMC_m > 500000)     { loRatio = 0.15; hiRatio = 6.5; }
+    else if (targetMC_m > 50000) { loRatio = 0.2;  hiRatio = 5;   }
+ 
+    let comparables = targetMC_m > 0
+      ? all.filter(c => {
+          const mc_m = c.mc / 1e6; // convert dollars → millions
+          return mc_m <= 0 || (mc_m / targetMC_m >= loRatio && mc_m / targetMC_m <= hiRatio);
+        })
+      : all;
+ 
+    if (comparables.length < 3) comparables = all;
+    if (comparables.length === 0) return null;
+ 
+    // Outlier trim
+    if (comparables.length >= 5) {
+      const sorted = [...comparables].sort((a, b) => a.pe - b.pe);
+      const trim   = Math.max(1, Math.floor(sorted.length * 0.1));
+      comparables  = sorted.slice(trim, sorted.length - trim);
     }
  
-    // Trim PE outliers (top & bottom 10%)
-    if (valid.length >= 6) {
-      const sorted = [...valid].sort((a, b) => a.pe - b.pe);
-      const trim   = Math.floor(sorted.length * 0.1);
-      valid = sorted.slice(trim, sorted.length - trim);
-    }
+    if (comparables.length < 2) return null;
  
-    if (valid.length < 2) return null;
+    const pes      = comparables.map(c => c.pe).sort((a, b) => a - b);
+    const mid      = Math.floor(pes.length / 2);
+    const medianPE = pes.length % 2 === 0 ? (pes[mid-1] + pes[mid]) / 2 : pes[mid];
+    const avgPE    = pes.reduce((a, b) => a + b, 0) / pes.length;
  
-    const pes     = valid.map(c => c.pe).sort((a, b) => a - b);
-    const mid     = Math.floor(pes.length / 2);
-    const median  = pes.length % 2 === 0 ? (pes[mid - 1] + pes[mid]) / 2 : pes[mid];
-    const avg     = pes.reduce((a, b) => a + b, 0) / pes.length;
-    const diff    = targetPE && targetPE > 0
-      ? parseFloat(((targetPE - avg) / avg * 100).toFixed(1))
-      : null;
- 
-    return {
-      medianPE:  parseFloat(median.toFixed(1)),
-      avgPE:     parseFloat(avg.toFixed(1)),
-      peerCount: valid.length,
-      diff,
-      peers:     valid.map(c => c.ticker),
+    const result = {
+      medianPE:  parseFloat(medianPE.toFixed(1)),
+      avgPE:     parseFloat(avgPE.toFixed(1)),
+      peerCount: comparables.length,
+      diff:      null,
+      peers:     comparables.map(c => c.ticker),
     };
-  } catch (_) { return null; }
+    if (targetPE && targetPE > 0) {
+      result.diff = parseFloat(((targetPE - avgPE) / avgPE * 100).toFixed(1));
+    }
+    return result;
+  } catch (_) {
+    return null;
+  }
 }
  
+// ── Rating ────────────────────────────────────────────────────────────────────
 function getRating(score) {
   if (score >= 5) return { label: 'Strong Buy', color: '#14532d', bg: '#dcfce7', border: '#86efac' };
   if (score === 4) return { label: 'Buy',        color: '#15803d', bg: '#f0fdf4', border: '#bbf7d0' };
@@ -368,175 +476,163 @@ function getRating(score) {
   return               { label: 'Ignore',        color: '#6b7280', bg: '#f9fafb', border: '#d1d5db' };
 }
  
-// ── Main per-ticker analysis ──────────────────────────────────────────────────
-async function analyseOne(ticker) {
-  // Fire Yahoo (chart + summary) and Finnhub in parallel — neither blocks the other
-  const [yahoo, fhData, insiderData] = await Promise.allSettled([
-    fetchAllYahooData(ticker),
-    fetchFinnhubData(ticker),
-    fetchInsiderTransactions(ticker, null), // curPx filled in below
+// Exchange lookup (Finnhub profile2 exchange field is often verbose — clean it up)
+const EXCHANGE_MAP = {
+  NASDAQ: 'NASDAQ', 'NASDAQ NMS - GLOBAL MARKET': 'NASDAQ', 'NASDAQ CAPITAL MARKET': 'NASDAQ',
+  NYSE: 'NYSE', 'NEW YORK STOCK EXCHANGE': 'NYSE', 'NYSE ARCA': 'NYSE',
+  LSE: 'LSE', 'LONDON STOCK EXCHANGE': 'LSE',
+  TSX: 'TSX', 'TORONTO STOCK EXCHANGE': 'TSX',
+};
+function cleanExchange(raw) {
+  if (!raw) return 'NYSE';
+  const up = raw.toUpperCase();
+  for (const [key, val] of Object.entries(EXCHANGE_MAP)) {
+    if (up.includes(key)) return val;
+  }
+  // Return first word if unrecognised (e.g. "XETRA" → "XETRA")
+  return raw.split(/[\s,]/)[0].toUpperCase() || 'NYSE';
+}
+ 
+// ── Fetch all data ────────────────────────────────────────────────────────────
+async function fetchStockData(ticker) {
+  const [quote, profile, metrics, earnings, analystTarget] = await Promise.allSettled([
+    fh(`/quote?symbol=${ticker}`),
+    fh(`/stock/profile2?symbol=${ticker}`),
+    fh(`/stock/metric?symbol=${ticker}&metric=all`),
+    fh(`/stock/earnings?symbol=${ticker}&limit=4`),
+    fetchAnalystTarget(ticker),
   ]);
  
-  const yh  = yahoo.status   === 'fulfilled' ? yahoo.value   : {};
-  const fhd = fhData.status  === 'fulfilled' ? fhData.value  : {};
-  const ins = insiderData.status === 'fulfilled' ? insiderData.value : { buys: [], sells: [], source: null };
+  const curPx        = quote.status    === 'fulfilled' ? quote.value?.c    : null;
+  const m            = metrics.status  === 'fulfilled' ? metrics.value?.metric || {} : {};
+  const targetPE     = m.peBasicExclExtraTTM || m.peTTM || null;
+  const targetMC     = m.marketCapitalization || 0; // millions
+  const targetMargin = m.netProfitMarginAnnual || m.netProfitMarginTTM || 0;
  
-  const fhq  = fhd.quote    || {};
-  const fhp  = fhd.profile  || {};
-  const fhm  = fhd.metrics?.metric || {};
-  const fhEarnings = Array.isArray(fhd.earnings) ? fhd.earnings : [];
+  const [ma50, insiderData, peerPE] = await Promise.all([
+    fetch50dMA(ticker),
+    fetchInsiderTransactions(ticker, curPx),
+    fetchPeerPE(ticker, targetPE, targetMC, targetMargin),
+  ]);
  
-  // ── Resolve best value for each field ──────────────────────────────────────
+  return {
+    quote:         quote.status         === 'fulfilled' ? quote.value         : null,
+    profile:       profile.status       === 'fulfilled' ? profile.value       : null,
+    metrics:       metrics.status       === 'fulfilled' ? metrics.value       : null,
+    earnings:      earnings.status      === 'fulfilled' ? earnings.value      : null,
+    analystTarget: analystTarget.status === 'fulfilled' ? analystTarget.value : null,
+    ma50, insiderData, peerPE,
+  };
+}
  
-  // Price — Finnhub quote is authoritative (real-time), Yahoo as fallback
-  const curPx = fhq.c || yh.price || null;
+// ── Evaluate ──────────────────────────────────────────────────────────────────
+function evaluate(ticker, d) {
+  const q     = d.quote   || {};
+  const p     = d.profile || {};
+  const m     = d.metrics?.metric || {};
+  const curPx = q.c;
   if (!curPx) return null;
  
-  // Day change %
-  const dayChangePct = fhq.dp != null ? fhq.dp : yh.dayChange;
+  const company  = p.name || ticker;
+  const mc       = p.marketCapitalization ? p.marketCapitalization * 1e6 : 0;
+  const mcs      = mc > 1e12 ? `$${(mc/1e12).toFixed(2)}T`
+    : mc > 1e9  ? `$${(mc/1e9).toFixed(1)}B`
+    : mc > 1e6  ? `$${(mc/1e6).toFixed(0)}M` : '';
+  const exchange = cleanExchange(p.exchange);
  
-  // PE — Yahoo chart/summary (usually works), Finnhub metric fallback
-  // BUG FIX: was previously assigning trailingEps to curPE
-  const pe = yh.pe
-    || (fhm.peBasicExclExtraTTM > 0 ? fhm.peBasicExclExtraTTM : null)
-    || (fhm.peTTM > 0 ? fhm.peTTM : null)
-    || null;
- 
-  // EPS — Finnhub epsBasicExclExtraAnnual is most reliable, Yahoo trailingEps fallback
-  const eps = (fhm.epsBasicExclExtraAnnual || fhm.epsTTM || yh.eps || null);
- 
-  // 52w range
-  const hi52 = yh.hi52 || fhm['52WeekHigh'] || null;
-  const lo52 = yh.lo52 || fhm['52WeekLow']  || null;
- 
-  // 50d MA — Yahoo closes (already computed), Finnhub candle fallback
-  let ma50 = yh.ma50 || null;
-  if (!ma50) {
-    try {
-      const candle = await fh(`/stock/candle?symbol=${ticker}&resolution=D&count=60`);
-      if (candle?.s === 'ok' && Array.isArray(candle.c)) ma50 = maFromCloses(candle.c);
-    } catch (_) {}
-  }
- 
-  // Market cap
-  const marketCap = yh.marketCap
-    || (fhm.marketCapitalization ? fhm.marketCapitalization * 1e6 : 0)
-    || (fhp.marketCapitalization ? fhp.marketCapitalization * 1e6 : 0);
- 
-  // Analyst target
-  let analystTarget = yh.analystTarget || null;
-  if (!analystTarget) {
-    try {
-      const d = await fh(`/stock/price-target?symbol=${ticker}`);
-      analystTarget = d?.targetMedian || d?.targetMean || null;
-    } catch (_) {}
-  }
- 
-  // Company name + exchange
-  const company = fhp.name || ticker;
-  const rawEx   = (fhp.exchange || yh.exchange || '')
-    .replace(/NASDAQ.*/i, 'NASDAQ').replace(/New York Stock Exchange.*/i, 'NYSE').toUpperCase().trim();
- 
-  // Market cap formatted
-  const mcs = marketCap > 1e12 ? `$${(marketCap / 1e12).toFixed(2)}T`
-    : marketCap > 1e9  ? `$${(marketCap / 1e9).toFixed(1)}B`
-    : marketCap > 1e6  ? `$${(marketCap / 1e6).toFixed(0)}M` : '';
- 
-  // Peer PE — fire after we have pe + marketCap
-  const peerPE = await fetchPeerPE(ticker, pe, marketCap);
- 
-  // ── Build 6 signals ────────────────────────────────────────────────────────
- 
-  // S1: EPS beat (Finnhub earnings — actual vs estimate)
+  // S1: EPS beat
   let s1 = { status: 'neutral', value: 'No data' };
   try {
-    if (fhEarnings.length > 0) {
-      const e = fhEarnings[0];
-      if (e.actual != null && e.estimate != null) {
-        const diff = e.actual - e.estimate;
-        const beat = diff >= 0;
-        const label = Math.abs(diff) < 0.005 ? 'in-line'
-          : beat ? `+$${Math.abs(diff).toFixed(2)}` : `-$${Math.abs(diff).toFixed(2)}`;
-        s1 = { status: beat ? 'pass' : 'fail',
-               value: beat ? `Beat by ${label}` : `Missed ${label}` };
-      }
+    const earns = Array.isArray(d.earnings) ? d.earnings : [];
+    if (earns.length > 0) {
+      const e    = earns[0];
+      const diff = e.actual - e.estimate;
+      const beat = diff >= 0;
+      const ds   = Math.abs(diff) < 0.005
+        ? 'in-line'
+        : beat ? `+$${Math.abs(diff).toFixed(2)}` : `-$${Math.abs(diff).toFixed(2)}`;
+      s1 = { status: beat ? 'pass' : 'fail', value: beat ? `Beat by ${ds}` : `Missed ${ds}` };
     }
   } catch (_) {}
  
-  // S2: PE vs historical average (midpoint of 52w range / EPS)
+  // S2: PE vs historical average
   let s2 = { status: 'neutral', value: 'No data' };
   try {
-    if (pe && pe > 0 && eps && eps > 0 && hi52 && lo52) {
-      const histPE = ((hi52 + lo52) / 2) / eps;
-      if (histPE > 0 && histPE < 1000) {
-        if (pe < histPE * 0.92)      s2 = { status: 'pass',    value: `PE ${pe.toFixed(1)}x < hist ~${histPE.toFixed(0)}x` };
-        else if (pe > histPE * 1.08) s2 = { status: 'fail',    value: `PE ${pe.toFixed(1)}x > hist ~${histPE.toFixed(0)}x` };
-        else                          s2 = { status: 'neutral', value: `PE ${pe.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x` };
-      }
-    } else if (pe && pe > 0) {
-      s2 = { status: 'neutral', value: `PE ${pe.toFixed(1)}x` };
+    const curPE = m.peBasicExclExtraTTM || m.peTTM;
+    const eps   = m.epsBasicExclExtraAnnual || m.epsTTM;
+    const hi    = m['52WeekHigh'];
+    const lo    = m['52WeekLow'];
+    if (curPE && eps > 0 && hi && lo) {
+      const histPE = ((hi + lo) / 2) / eps;
+      if (curPE < histPE * 0.92)      s2 = { status: 'pass',    value: `PE ${curPE.toFixed(1)}x < hist ~${histPE.toFixed(0)}x` };
+      else if (curPE > histPE * 1.08) s2 = { status: 'fail',    value: `PE ${curPE.toFixed(1)}x > hist ~${histPE.toFixed(0)}x` };
+      else                             s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x` };
+    } else if (curPE) {
+      s2 = { status: 'neutral', value: `PE ${curPE.toFixed(1)}x` };
     }
   } catch (_) {}
  
   // S3: Price vs 50d MA
   let s3 = { status: 'neutral', value: 'No data' };
   try {
-    if (ma50 && curPx) {
-      const pct = ((curPx - ma50) / ma50 * 100).toFixed(1);
-      s3 = curPx <= ma50
-        ? { status: 'pass', value: `$${curPx.toFixed(2)} ≤ MA $${ma50.toFixed(2)} (${pct}%)` }
-        : { status: 'fail', value: `$${curPx.toFixed(2)} > MA $${ma50.toFixed(2)} (+${pct}%)` };
+    if (d.ma50 && curPx) {
+      const pct = ((curPx - d.ma50) / d.ma50 * 100).toFixed(1);
+      s3 = curPx <= d.ma50
+        ? { status: 'pass', value: `$${curPx.toFixed(2)} ≤ MA $${d.ma50.toFixed(2)} (${pct}%)` }
+        : { status: 'fail', value: `$${curPx.toFixed(2)} > MA $${d.ma50.toFixed(2)} (+${pct}%)` };
     }
   } catch (_) {}
  
   // S4: Insider buying
-  const s4 = buildInsiderValue(ins.buys || [], ins.sells || []);
+  const { buys, sells, source } = d.insiderData || { buys: [], sells: [], source: null };
+  const s4 = buildInsiderValue(buys, sells, source);
  
-  // S5: Analyst price target ≥ +25% upside
+  // S5: Analyst price target ≥ +25%
   let s5 = { status: 'neutral', value: 'No data' };
   try {
-    if (analystTarget && curPx) {
-      const up = ((analystTarget - curPx) / curPx * 100).toFixed(1);
+    const tgt = d.analystTarget;
+    if (tgt && curPx) {
+      const up = ((tgt - curPx) / curPx * 100).toFixed(1);
       s5 = parseFloat(up) >= 25
-        ? { status: 'pass', value: `Target $${analystTarget.toFixed(2)}, +${up}% upside` }
-        : { status: 'fail', value: `Target $${analystTarget.toFixed(2)}, ${up}% upside` };
+        ? { status: 'pass', value: `Target $${tgt.toFixed(2)}, +${up}% upside` }
+        : { status: 'fail', value: `Target $${tgt.toFixed(2)}, +${up}% upside` };
     }
   } catch (_) {}
  
   // S6: PE vs peers
   let s6 = { status: 'neutral', value: 'No data' };
   try {
-    const pp = peerPE;
-    if (pp && pp.diff !== null) {
-      if (pp.diff < -8)      s6 = { status: 'pass',    value: `${Math.abs(pp.diff).toFixed(0)}% < peer avg ${pp.avgPE}x (n=${pp.peerCount})` };
-      else if (pp.diff > 8)  s6 = { status: 'fail',    value: `${Math.abs(pp.diff).toFixed(0)}% > peer avg ${pp.avgPE}x (n=${pp.peerCount})` };
-      else                   s6 = { status: 'neutral', value: `In line w/ peers ${pp.avgPE}x (n=${pp.peerCount})` };
+    const pp = d.peerPE;
+    if (pp && pp.medianPE && pp.diff !== null) {
+      if (pp.diff < -8)       s6 = { status: 'pass',    value: `${Math.abs(pp.diff).toFixed(0)}% < peer avg ${pp.avgPE}x` };
+      else if (pp.diff > 8)   s6 = { status: 'fail',    value: `${Math.abs(pp.diff).toFixed(0)}% > peer avg ${pp.avgPE}x` };
+      else                    s6 = { status: 'neutral', value: `In line, avg ${pp.avgPE}x` };
     } else if (pp?.medianPE) {
-      s6 = { status: 'neutral', value: `Peer median ${pp.medianPE}x` };
+      s6 = { status: 'neutral', value: `Peer avg ${pp.avgPE}x` };
     }
   } catch (_) {}
  
-  const signals = [s1, s2, s3, s4, s5, s6];
-  const score   = signals.filter(s => s.status === 'pass').length;
-  const NAMES   = ['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside','PE vs peers'];
-  const passes  = signals.map((s, i) => s.status === 'pass' ? NAMES[i] : null).filter(Boolean);
-  const fails   = signals.map((s, i) => s.status === 'fail' ? NAMES[i] : null).filter(Boolean);
+  const signals   = [s1, s2, s3, s4, s5, s6];
+  const score     = signals.filter(s => s.status === 'pass').length;
+  const SIG_NAMES = ['EPS beat', 'Low PE', 'Below 50d MA', 'Insider buying', 'Analyst upside', 'PE vs peers'];
+  const passes    = signals.map((s, i) => s.status === 'pass' ? SIG_NAMES[i] : null).filter(Boolean);
+  const fails     = signals.map((s, i) => s.status === 'fail' ? SIG_NAMES[i] : null).filter(Boolean);
  
   let summary;
   if (score >= 5)       summary = `Strong value candidate — ${score}/6 signals pass. Strengths: ${passes.join(', ')}.`;
   else if (score === 4) summary = `Good signals (4/6). Passes: ${passes.join(', ')}.`;
   else if (score === 3) summary = `Moderate signals (3/6). Passes: ${passes.join(', ')}.`;
-  else if (score > 0)   summary = `Weak signals (${score}/6). Passes: ${passes.join(', ')}. Fails: ${fails.join(', ')}.`;
+  else if (score > 0)   summary = `Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
   else                  summary = `No signals pass. Fails: ${fails.join(', ')}.`;
  
   return {
-    ticker, company,
-    exchange:  rawEx || 'NYSE',
+    ticker, company, exchange,
     price:     `$${curPx.toFixed(2)}`,
-    change:    dayChangePct != null ? `${dayChangePct > 0 ? '+' : ''}${dayChangePct.toFixed(2)}%` : null,
+    change:    q.dp != null ? `${q.dp > 0 ? '+' : ''}${q.dp.toFixed(2)}%` : null,
     marketCap: mcs,
     score, signals, summary,
     rating:    getRating(score),
+    peerPE:    d.peerPE || null,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -551,12 +647,13 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'tickers array required' });
  
   const results = {};
-  const cleaned = [...new Set(tickers.slice(0, 20).map(t => t.toUpperCase().trim()))];
+  const cleaned = tickers.slice(0, 20).map(t => t.toUpperCase().trim());
  
   await Promise.allSettled(cleaned.map(async ticker => {
     try {
-      const ev = await analyseOne(ticker);
-      results[ticker] = ev || { ticker, error: 'No price data' };
+      const raw = await fetchStockData(ticker);
+      const ev  = evaluate(ticker, raw);
+      results[ticker] = ev || { ticker, error: 'No quote data' };
     } catch (e) {
       results[ticker] = { ticker, error: e.message };
     }
