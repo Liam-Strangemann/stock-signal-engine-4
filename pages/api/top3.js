@@ -1,13 +1,13 @@
 // pages/api/top3.js
 //
-// Broad Yahoo Finance scan — ~200 stocks, no API key needed, pure Yahoo.
-// Returns the top 8 candidates by quick-score for the browser to analyse.
-// The browser then POSTs those 8 tickers to /api/analyse.
+// ONLY responsibility: scan ~200 stocks via Yahoo Finance (no API key needed)
+// and return the top 8 candidates by quick-score.
 //
-// This file contains ZERO signal logic — it only quick-scores on public
-// price/PE/52w data. All real signal work stays in analyse.js.
+// The browser then POSTs those 8 tickers directly to /api/analyse.
+// There are NO Finnhub calls here and NO server-to-server calls to /api/analyse.
+// Both of those patterns break on Vercel free tier.
 //
-// Cache: 45 minutes. First load ~4-6 seconds (batched parallel Yahoo fetches).
+// Cache: 45 minutes in-memory.
  
 const YH = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -17,42 +17,41 @@ const YH = {
   'Referer': 'https://finance.yahoo.com/',
 };
  
-// ~200 large/mid cap stocks across all sectors
 const UNIVERSE = [
   // Mega-cap tech
   'AAPL','MSFT','GOOGL','AMZN','META','NVDA','TSLA','AVGO','ORCL','ADBE',
   'AMD','INTC','QCOM','TXN','AMAT','MU','NOW','CRM','PANW','INTU',
-  'CSCO','IBM','ACN','KLAC','LRCX','SNPS','CDNS','FTNT','WDAY','SNOW',
+  'CSCO','IBM','ACN','KLAC','LRCX','SNPS','CDNS','FTNT','WDAY','TTD',
   // Financials
   'JPM','BAC','WFC','GS','MS','BLK','C','AXP','SCHW','USB',
   'PNC','TFC','COF','DFS','AIG','MET','PRU','AFL','CB','TRV',
-  'CME','ICE','SPGI','MCO','MA','V','BX','KKR','PYPL','SQ',
+  'CME','ICE','SPGI','MCO','MA','V','BX','KKR','PYPL',
   // Healthcare
   'LLY','JNJ','UNH','ABBV','MRK','PFE','TMO','ABT','AMGN','CVS',
   'MDT','ISRG','BSX','SYK','REGN','BIIB','VRTX','CI','HUM','ELV',
-  'GEHC','ZBH','BAX','BDX','IQV','IDXX','DXCM','PODD','HOLX','RMD',
+  'GEHC','ZBH','BAX','BDX','IQV','IDXX','DXCM','RMD',
   // Energy
   'XOM','CVX','COP','EOG','SLB','MPC','PSX','VLO','OXY','DVN',
-  'HAL','BKR','HES','TPL','FANG','MRO','APA','CTRA','PR',
+  'HAL','BKR','HES','TPL','FANG','MRO',
   // Consumer discretionary
-  'AMZN','TSLA','HD','MCD','NKE','SBUX','LOW','TGT','COST','BKNG',
-  'MAR','HLT','YUM','CMG','DRI','ORLY','AZO','TSCO','ULTA','BBY',
-  'TJX','ROST','RCL','CCL','LVS','MGM','WYNN','F','GM','RIVN',
+  'HD','MCD','NKE','SBUX','LOW','TGT','COST','BKNG','MAR','HLT',
+  'YUM','CMG','DRI','ORLY','AZO','TSCO','ULTA','TJX','ROST',
+  'F','GM','RCL','CCL','LVS','MGM',
   // Consumer staples
   'KO','PEP','PG','PM','MO','KHC','GIS','HSY','MDLZ','CL',
-  'CLX','CHD','SYY','KR','CAG','MKC','TSN','HRL','K','SJM',
+  'CLX','CHD','SYY','KR','CAG','MKC','TSN','HRL',
   // Industrials
   'CAT','HON','GE','RTX','LMT','NOC','GD','UPS','FDX',
   'UNP','CSX','NSC','DE','EMR','ROK','ITW','ETN','PH','DOV',
-  'MMM','CARR','OTIS','WM','RSG','CTAS','VRSK','LDOS','SAIC',
+  'MMM','CARR','OTIS','WM','RSG','CTAS',
   // Materials
-  'LIN','APD','ECL','NEM','FCX','PPG','SHW','ALB','MOS','CF',
+  'LIN','APD','ECL','NEM','FCX','PPG','SHW','ALB',
   // Utilities
-  'NEE','DUK','SO','AEP','EXC','D','PCG','XEL','WEC','ES',
+  'NEE','DUK','SO','AEP','EXC','D','PCG','XEL','WEC',
   // REITs
-  'AMT','PLD','EQIX','CCI','SPG','O','VICI','PSA','EQR','AVB',
+  'AMT','PLD','EQIX','CCI','SPG','O','VICI','PSA',
   // Communications
-  'T','VZ','TMUS','CMCSA','CHTR','NFLX','DIS','WBD','PARA',
+  'T','VZ','TMUS','CMCSA','NFLX','DIS',
   // International (US-listed)
   'TSM','ASML','NVO','SAP','TM','AZN','HSBC','SHEL','BHP','RIO',
   'NVS','UL','GSK','BTI','DEO','BP','TTE','BABA','JD','PDD',
@@ -64,7 +63,7 @@ let cache = { data: null, ts: 0 };
 const TTL = 45 * 60 * 1000;
  
 async function fetchQuick(symbol) {
-  for (const base of ['https://query1.finance.yahoo.com','https://query2.finance.yahoo.com']) {
+  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
     try {
       const r = await fetch(
         `${base}/v8/finance/chart/${symbol}?interval=1d&range=1y`,
@@ -78,11 +77,11 @@ async function fetchQuick(symbol) {
       const price  = meta.regularMarketPrice;
       const hi     = meta.fiftyTwoWeekHigh || price * 1.2;
       const lo     = meta.fiftyTwoWeekLow  || price * 0.8;
-      const pe     = meta.trailingPE || null;
-      const mc     = meta.marketCap  || 0;
+      const pe     = meta.trailingPE  || null;
+      const mc     = meta.marketCap   || 0;
       const range  = hi - lo;
-      const fromHi = hi > 0 ? ((hi - price) / hi * 100) : 0;   // % below 52w high
-      const loPct  = range > 0 ? ((price - lo) / range * 100) : 50; // position in range
+      const fromHi = hi > 0 ? ((hi - price) / hi * 100) : 0;
+      const loPct  = range > 0 ? ((price - lo) / range * 100) : 50;
  
       return { symbol, price, hi, lo, pe, mc, fromHi, loPct };
     } catch (_) {}
@@ -90,28 +89,24 @@ async function fetchQuick(symbol) {
   return null;
 }
  
-// Value-oriented quick score (no Finnhub, pure Yahoo meta)
+// Value-tilt quick score — selects stocks most likely to score highly in
+// the full 6-signal analysis (cheap PE, pulled back, large cap)
 function quickScore(s) {
   let n = 0;
- 
-  // Low PE is good (max 30 pts)
+  // Low PE (max 35 pts)
   if (s.pe && s.pe > 3 && s.pe < 200) {
-    n += Math.max(0, 30 - s.pe * 0.5);
+    n += Math.max(0, 35 - s.pe * 0.6);
   }
- 
-  // Pulled back from 52w high but not in freefall (max 25 pts)
-  if (s.fromHi > 5 && s.fromHi < 60) {
-    n += Math.min(25, s.fromHi * 0.7);
+  // Pulled back from 52w high — potential undervalue (max 25 pts)
+  if (s.fromHi > 5 && s.fromHi < 55) {
+    n += Math.min(25, s.fromHi * 0.65);
   }
- 
-  // Not at 52w low (avoid distressed names)
+  // Not at 52w low — avoid distressed/falling knives
   if (s.loPct > 20 && s.loPct < 85) n += 8;
- 
-  // Large cap preference (better data, more liquid)
-  if (s.mc > 500e9)       n += 12;
-  else if (s.mc > 100e9)  n += 8;
-  else if (s.mc > 10e9)   n += 4;
- 
+  // Large cap preference (better data quality, more analyst coverage)
+  if (s.mc > 500e9)      n += 12;
+  else if (s.mc > 100e9) n += 8;
+  else if (s.mc > 10e9)  n += 4;
   return Math.round(n);
 }
  
@@ -122,22 +117,28 @@ export default async function handler(req, res) {
   }
  
   try {
-    // Parallel batches of 25 — Yahoo can handle this
+    // Fetch all in parallel batches of 25
     const BATCH = 25;
-    const all = [];
     const batches = [];
     for (let i = 0; i < UNIQ.length; i += BATCH) batches.push(UNIQ.slice(i, i + BATCH));
-    const settled = await Promise.all(batches.map(b => Promise.all(b.map(fetchQuick))));
-    settled.flat().forEach(r => r && all.push(r));
  
-    // Top 8 by quick-score — these go to /api/analyse for full signal analysis
-    const candidates = all
+    const allStocks = (
+      await Promise.all(batches.map(b => Promise.all(b.map(fetchQuick))))
+    ).flat().filter(Boolean);
+ 
+    // Top 8 candidates for full analysis
+    const candidates = allStocks
       .map(s => ({ ...s, qs: quickScore(s) }))
       .sort((a, b) => b.qs - a.qs)
       .slice(0, 8)
       .map(s => s.symbol);
  
-    const result = { candidates, totalScanned: all.length, generatedAt: new Date().toISOString() };
+    const result = {
+      candidates,
+      totalScanned: allStocks.length,
+      generatedAt:  new Date().toISOString(),
+    };
+ 
     cache = { data: result, ts: Date.now() };
     res.setHeader('Cache-Control', 's-maxage=2700, stale-while-revalidate');
     return res.status(200).json(result);
