@@ -348,7 +348,13 @@ export default function Home() {
       });
       const data    = await res.json();
       const fresh   = data?.results?.[ticker];
-      const newSig  = fresh?.signals?.[signalIndex] || { status:'neutral', value:'No data' };
+      let   newSig  = fresh?.signals?.[signalIndex] || { status:'neutral', value:'No data' };
+ 
+      // Signal 3 = insider buying. If the API genuinely found nothing after
+      // retrying, settle on a readable message so the pill stops being retryable.
+      if (signalIndex === 3 && (!newSig.value || newSig.value === 'No data' || newSig.value === 'No activity (30d)')) {
+        newSig = { status:'neutral', value:'No recent insider transactions' };
+      }
  
       setState(prev => prev.map(stock => {
         if (!stock || stock.ticker !== ticker) return stock;
@@ -535,4 +541,3 @@ export default function Home() {
     </>
   );
 }
- 
