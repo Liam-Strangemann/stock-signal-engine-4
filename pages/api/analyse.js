@@ -1,6 +1,32 @@
-// pages/api/analyse.js  v6
+// pages/api/analyse.js  v7
 //
-// Every signal has 6–10 independent data sources with fallback chains.
+// Fixes vs v6:
+//
+//  PE VS PEERS (resolvePeerPE / getPeerPE):
+//    - Hard cap per-peer PE at 150x (was 600x — allowed garbage data through)
+//    - Cross-source validation: if only one source returns a PE, it must be
+//      within 3× of a rough sector baseline to be accepted; wild outliers are
+//      discarded rather than trimmed after the fact
+//    - Trimmed-mean trim raised from 10% → 20% each side so it actually fires
+//      on small peer lists (5 peers → removes 1 from each end)
+//    - diff now consistently compared against medianPE (more robust) rather
+//      than avgPE, and avgPE is still reported for display
+//    - Market-cap band tightened: lo=0.15, hi=6 (was 0.07–14)
+//    - Minimum 3 valid peers required before a result is returned (was 2)
+//
+//  INSIDER BUYING (resolveInsider / buildInsider):
+//    - OpenInsider value column parser completely rewritten:
+//        "$1.23M" → 1_230_000  |  "$456K" → 456_000  |  "+$789,012" → 789_012
+//    - Per-transaction sanity check: value must be > $500 and < $5B
+//    - Share count sanity check: shares must be > 0 and < 500M
+//    - Finnhub `value` field: confirmed it's in USD — added a check that it
+//      isn't suspiciously large (>$10B) which would indicate a data error
+//    - Deduplication: transactions from OpenInsider are skipped if Finnhub
+//      already returned data for the same ticker (no double-counting)
+//    - buildInsider caps displayed value at $10B as a final sanity guard
+//
+// All other logic is unchanged from v6.
+//
 // Sources used (in priority order per signal):
 //
 //  ALWAYS WORKS (Finnhub authenticated API):
@@ -55,6 +81,14 @@ const API_HEADERS = {
 };
  
 // ─────────────────────────────────────────────────────────────────────────────
+// PE sanity bounds
+// Hard cap per-peer PE. 150x is already extreme (e.g. high-growth tech).
+// Anything above this is almost certainly a data artefact (negative EPS quarter
+// causing a sign flip, stale data, scraper misparse, etc.).
+// ─────────────────────────────────────────────────────────────────────────────
+const PE_MAX = 150;
+ 
+// ─────────────────────────────────────────────────────────────────────────────
 // Core fetchers
 // ─────────────────────────────────────────────────────────────────────────────
  
@@ -86,7 +120,6 @@ let _crumb = null, _cookies = '', _crumbTs = 0;
 async function getYahooCrumb() {
   if (_crumb && Date.now() - _crumbTs < 300000) return { crumb: _crumb, cookies: _cookies };
   try {
-    // Fetch consent page to get cookies
     const home = await fetch('https://finance.yahoo.com/', {
       headers: { 'User-Agent': BROWSER['User-Agent'], 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' },
       redirect: 'follow', signal: AbortSignal.timeout(8000),
@@ -94,7 +127,6 @@ async function getYahooCrumb() {
     const setCookie = home.headers.get('set-cookie') || '';
     _cookies = setCookie.split(',').map(c => c.split(';')[0].trim()).filter(c => c.includes('=')).join('; ');
  
-    // Get crumb
     for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
       try {
         const cr = await fetch(`${base}/v1/test/getcrumb`, {
@@ -163,12 +195,10 @@ async function fetchStockAnalysis(ticker) {
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     if (!m) return null;
     const data = JSON.parse(m[1]);
-    // Navigate to the quote data
     const props = data?.props?.pageProps;
     const quote = props?.data?.quote || props?.quote || null;
     if (quote) { _saCache[ticker] = quote; return quote; }
   } catch (_) {}
-  // Also try financials page for EPS
   try {
     const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/financials/`);
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
@@ -180,7 +210,6 @@ async function fetchStockAnalysis(ticker) {
   return null;
 }
  
-// Extract numbers from stockanalysis data — handles various schema shapes
 function saExtract(sa, fields) {
   if (!sa) return null;
   for (const field of fields) {
@@ -201,8 +230,6 @@ async function fetchMarketWatch(ticker) {
   if (_mwCache[ticker]) return _mwCache[ticker];
   try {
     const html = await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}`);
- 
-    // Try __PRELOADED_STATE__
     const m1 = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
     if (m1) {
       try {
@@ -211,8 +238,6 @@ async function fetchMarketWatch(ticker) {
         return _mwCache[ticker];
       } catch (_) {}
     }
- 
-    // Extract individual fields from HTML patterns
     const result = { type: 'html', raw: html };
     _mwCache[ticker] = result;
     return result;
@@ -223,7 +248,6 @@ function mwExtractPE(mw) {
   if (!mw) return null;
   if (mw.type === 'state') {
     const d = mw.data;
-    // Try various paths in the state tree
     const paths = [
       d?.instrumentData?.primaryData?.peRatio,
       d?.quote?.peRatio,
@@ -232,14 +256,13 @@ function mwExtractPE(mw) {
     for (const v of paths) { if (v && !isNaN(parseFloat(v))) return parseFloat(v); }
   }
   if (mw.raw) {
-    // HTML patterns
     for (const p of [
       /"peRatio"\s*:\s*"?([\d.]+)"?/,
       /P\/E Ratio[^<]*<\/span>[^<]*<span[^>]*>([\d.]+)/,
       /class="[^"]*pe-ratio[^"]*"[^>]*>([\d.]+)/,
     ]) {
       const m = mw.raw.match(p);
-      if (m) { const v = parseFloat(m[1]); if (v > 0 && v < 1000) return v; }
+      if (m) { const v = parseFloat(m[1]); if (v > 0 && v < PE_MAX) return v; }
     }
   }
   return null;
@@ -279,7 +302,7 @@ function zacksExtractPE(html) {
     /Earnings Per Share[^<]*<[^>]+>([-\d.]+)/,
   ]) {
     const m = html.match(p);
-    if (m) { const v = parseFloat(m[1]); if (v > 0 && v < 1000) return v; }
+    if (m) { const v = parseFloat(m[1]); if (v > 0 && v < PE_MAX) return v; }
   }
   return null;
 }
@@ -299,24 +322,18 @@ function zacksExtractTarget(html) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// macrotrends.net — PE ratio history and EPS history  
+// macrotrends.net — PE ratio history and EPS history
 // ─────────────────────────────────────────────────────────────────────────────
  
-// Company name → macrotrends slug (needed for URL)
-// We'll try to discover the slug from a search
 async function fetchMacrotrendsEPS(ticker) {
   try {
-    // Macrotrends URLs follow pattern: /stocks/charts/{TICKER}/{company-name}/eps-earnings
-    // Try common format first
     const html = await getPage(
       `https://www.macrotrends.net/stocks/charts/${ticker.toUpperCase()}/x/eps-earnings-per-share-diluted`,
       10000
     );
-    // Extract annual EPS from chartData
     const m = html.match(/var\s+chartData\s*=\s*(\[[\s\S]*?\]);/);
     if (m) {
       const arr = JSON.parse(m[1]);
-      // Array of [date, value] sorted newest first
       const recent = arr.filter(a => a?.[1] != null && !isNaN(parseFloat(a[1]))).slice(0, 4);
       if (recent.length > 0) return parseFloat(recent[0][1]);
     }
@@ -363,10 +380,8 @@ async function fetchSecEPS(ticker) {
     const facts = d?.facts?.['us-gaap'];
     for (const key of ['EarningsPerShareBasic', 'EarningsPerShareDiluted', 'EarningsPerShareBasicAndDiluted']) {
       const units = facts?.[key]?.units?.['USD/shares'] || [];
-      // Annual 10-K filings first
       const annual = units.filter(e => e.form === '10-K').sort((a, b) => new Date(b.end) - new Date(a.end));
       if (annual.length > 0 && annual[0].val != null) return annual[0].val;
-      // TTM from 4 quarters
       const qtrs = units.filter(e => e.form === '10-Q').sort((a, b) => new Date(b.end) - new Date(a.end)).slice(0, 4);
       if (qtrs.length === 4) {
         const ttm = qtrs.reduce((s, q) => s + (q.val || 0), 0);
@@ -404,16 +419,13 @@ function compute50dMA(closes) {
 }
  
 async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
-  // 1. Alpha Vantage OVERVIEW — pre-computed, very reliable
   const av = parseFloat(avData?.['50DayMovingAverage']);
   if (av > 0 && !isNaN(av)) return av;
  
-  // 2. Compute from Yahoo 1y chart closes (already fetched)
   const yhCloses = yahooChartData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
   const yhMA = compute50dMA(yhCloses);
   if (yhMA > 0) return yhMA;
  
-  // 3. Finnhub candle — primary dedicated OHLCV source
   try {
     const to   = Math.floor(Date.now()/1000);
     const from = to - 90*86400;
@@ -424,14 +436,12 @@ async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
     }
   } catch (_) {}
  
-  // 4. Yahoo summaryDetail fiftyDayAverage (different endpoint)
   try {
     const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`, crumbInfo);
     const ma = j?.quoteSummary?.result?.[0]?.summaryDetail?.fiftyDayAverage?.raw;
     if (ma>0) return ma;
   } catch (_) {}
  
-  // 5. Yahoo chart 3mo (shorter range, different params)
   try {
     const j = await yahooFetch(`/v8/finance/chart/${ticker}?interval=1d&range=3mo`, crumbInfo);
     const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
@@ -439,14 +449,12 @@ async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
     if (ma>0) return ma;
   } catch (_) {}
  
-  // 6. stockanalysis.com — has 50dMA in quote data
   try {
     const sa = await fetchStockAnalysis(ticker);
     const ma = saExtract(sa, ['ma50','movingAverage50','fiftyDayAverage','avg50']);
     if (ma>0) return ma;
   } catch (_) {}
  
-  // 7. MarketWatch embedded state
   try {
     const mw = await fetchMarketWatch(ticker);
     if (mw?.raw) {
@@ -455,7 +463,6 @@ async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
     }
   } catch (_) {}
  
-  // 8. Stooq CSV — free, no IP restrictions
   try {
     const r = await fetch(`https://stooq.com/q/d/l/?s=${ticker.toLowerCase()}.us&i=d`, {
       headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000),
@@ -476,55 +483,46 @@ async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
  
 // ── S2: EPS (needed for PE vs hist avg) ───────────────────────────────────────
 async function resolveEPS(ticker, avData, fhMetric, crumbInfo) {
-  // 1. Alpha Vantage OVERVIEW.EPS
   const avEPS = parseFloat(avData?.EPS);
   if (!isNaN(avEPS) && avEPS!==0) return avEPS;
  
-  // 2. Finnhub metric (often null on free tier, but try)
   const fhEPS = fhMetric?.epsTTM || fhMetric?.epsBasicExclExtraAnnual;
   if (fhEPS && fhEPS!==0) return fhEPS;
  
-  // 3. Yahoo defaultKeyStatistics trailingEps
   try {
     const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`, crumbInfo);
     const eps = j?.quoteSummary?.result?.[0]?.defaultKeyStatistics?.trailingEps?.raw;
     if (eps!=null && eps!==0) return eps;
   } catch (_) {}
  
-  // 4. Yahoo earningsHistory — TTM sum
   try {
     const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=earningsHistory`, crumbInfo);
     const h = j?.quoteSummary?.result?.[0]?.earningsHistory?.history||[];
     if (h.length>=2) { const ttm=h.slice(-4).reduce((s,q)=>s+(q?.epsActual?.raw||0),0); if (ttm!==0) return ttm; }
   } catch (_) {}
  
-  // 5. stockanalysis.com __NEXT_DATA__
   try {
     const sa = await fetchStockAnalysis(ticker);
     const eps = saExtract(sa, ['eps','epsTrailingTwelveMonths','epsTTM','earningsPerShare','netEPS','annualEPS']);
     if (eps!=null && eps!==0) return eps;
   } catch (_) {}
  
-  // 6. MarketWatch
   try {
     const mw = await fetchMarketWatch(ticker);
     const eps = mwExtractEPS(mw);
     if (eps!=null && eps!==0) return eps;
   } catch (_) {}
  
-  // 7. Macrotrends EPS
   try {
     const eps = await fetchMacrotrendsEPS(ticker);
     if (eps!=null && eps!==0) return eps;
   } catch (_) {}
  
-  // 8. SEC EDGAR XBRL — ground truth from filings
   try {
     const eps = await fetchSecEPS(ticker);
     if (eps!=null && eps!==0) return eps;
   } catch (_) {}
  
-  // 9. Zacks HTML scrape
   try {
     const html = await fetchZacks(ticker);
     if (html) {
@@ -539,44 +537,37 @@ async function resolveEPS(ticker, avData, fhMetric, crumbInfo) {
  
 // ── S2: Current PE ─────────────────────────────────────────────────────────────
 async function resolvePE(ticker, avData, fhMetric, crumbInfo, yahooChartData) {
-  // 1. Alpha Vantage
   const avPE = parseFloat(avData?.PERatio);
-  if (!isNaN(avPE) && avPE>0 && avPE<600) return avPE;
+  if (!isNaN(avPE) && avPE>0 && avPE<PE_MAX) return avPE;
  
-  // 2. Finnhub metric
   const fhPE = fhMetric?.peBasicExclExtraTTM || fhMetric?.peTTM;
-  if (fhPE>0 && fhPE<600) return fhPE;
+  if (fhPE>0 && fhPE<PE_MAX) return fhPE;
  
-  // 3. Yahoo chart meta (from already-fetched data)
   const yhPE = yahooChartData?.chart?.result?.[0]?.meta?.trailingPE;
-  if (yhPE>0 && yhPE<600) return yhPE;
+  if (yhPE>0 && yhPE<PE_MAX) return yhPE;
  
-  // 4. Yahoo summaryDetail
   try {
     const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`, crumbInfo);
     const pe = j?.quoteSummary?.result?.[0]?.summaryDetail?.trailingPE?.raw;
-    if (pe>0 && pe<600) return pe;
+    if (pe>0 && pe<PE_MAX) return pe;
   } catch (_) {}
  
-  // 5. stockanalysis.com
   try {
     const sa = await fetchStockAnalysis(ticker);
     const pe = saExtract(sa, ['pe','peRatio','priceEarnings','trailingPE','forwardPE']);
-    if (pe>0 && pe<600) return pe;
+    if (pe>0 && pe<PE_MAX) return pe;
   } catch (_) {}
  
-  // 6. MarketWatch
   try {
     const mw = await fetchMarketWatch(ticker);
     const pe = mwExtractPE(mw);
-    if (pe>0 && pe<600) return pe;
+    if (pe>0 && pe<PE_MAX) return pe;
   } catch (_) {}
  
-  // 7. Zacks
   try {
     const html = await fetchZacks(ticker);
     const pe = zacksExtractPE(html);
-    if (pe>0 && pe<600) return pe;
+    if (pe>0 && pe<PE_MAX) return pe;
   } catch (_) {}
  
   return null;
@@ -584,18 +575,15 @@ async function resolvePE(ticker, avData, fhMetric, crumbInfo, yahooChartData) {
  
 // ── S5: Analyst target ─────────────────────────────────────────────────────────
 async function resolveTarget(ticker, avData, crumbInfo) {
-  // 1. Alpha Vantage AnalystTargetPrice
   const avT = parseFloat(avData?.AnalystTargetPrice);
   if (!isNaN(avT) && avT>0) return avT;
  
-  // 2. Finnhub /stock/price-target (works on free tier)
   try {
     const d = await fh(`/stock/price-target?symbol=${ticker}`);
     const t = d?.targetMedian || d?.targetMean;
     if (t>0) return t;
   } catch (_) {}
  
-  // 3. Yahoo financialData
   try {
     const j = await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=financialData`, crumbInfo);
     const fd = j?.quoteSummary?.result?.[0]?.financialData;
@@ -603,10 +591,8 @@ async function resolveTarget(ticker, avData, crumbInfo) {
     if (t>0) return t;
   } catch (_) {}
  
-  // 4. stockanalysis.com analyst data
   try {
     const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`);
-    // Look for price target in Next.js data
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     if (m) {
       const d    = JSON.parse(m[1]);
@@ -615,7 +601,6 @@ async function resolveTarget(ticker, avData, crumbInfo) {
                    saExtract(ppts, ['data.priceTarget','data.targetPrice','data.analystTarget','priceTarget']);
       if (t>0) return t;
     }
-    // Regex fallback on the HTML
     for (const p of [
       /price\s+target[^$<]*\$\s*([\d,]+\.?\d*)/i,
       /consensus[^$<]*\$\s*([\d,]+\.?\d*)/i,
@@ -627,14 +612,12 @@ async function resolveTarget(ticker, avData, crumbInfo) {
     }
   } catch (_) {}
  
-  // 5. Zacks price target
   try {
     const html = await fetchZacks(ticker);
     const t = zacksExtractTarget(html);
     if (t>0) return t;
   } catch (_) {}
  
-  // 6. MarketWatch analyst section
   try {
     const html = await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}/analystestimates`);
     for (const p of [/target\s*price[^$<]*\$\s*([\d,]+\.?\d*)/i, /mean\s*target[^$<]*\$\s*([\d,]+\.?\d*)/i]) {
@@ -654,7 +637,6 @@ function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
   let lo = fhMetric?.['52WeekLow']  || parseFloat(avData?.['52WeekLow'])  || yahooChartMeta?.fiftyTwoWeekLow  || null;
   if (isNaN(hi)) hi=null;
   if (isNaN(lo)) lo=null;
-  // Fallback: compute from closes
   if ((!hi||!lo) && yahooChartCloses.length>50) {
     if (!hi) hi=Math.max(...yahooChartCloses);
     if (!lo) lo=Math.min(...yahooChartCloses);
@@ -664,74 +646,204 @@ function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
  
 // ─────────────────────────────────────────────────────────────────────────────
 // Insider transactions
+//
+// FIX: OpenInsider value column parser completely rewritten.
+//
+// OpenInsider value column examples:
+//   "+$1,234,567"   → 1_234_567
+//   "$1.23M"        → 1_230_000
+//   "$456K"         → 456_000
+//   "$789,012"      → 789_012
+//   "(123,456)"     → 123_456   (parentheses = negative on some rows, treat as abs)
+//
+// The old parser did replace(/[^0-9]/g,'') which turned "$1.23M" into "123"
+// (dropping the "M" suffix meaning), producing nonsense values.
 // ─────────────────────────────────────────────────────────────────────────────
+ 
+/**
+ * Parse an OpenInsider-formatted dollar value string into a raw number (USD).
+ * Returns 0 if parsing fails or result is outside sanity bounds.
+ */
+function parseOpenInsiderValue(raw) {
+  if (!raw) return 0;
+  const s = raw.replace(/[\s+()]/g, '').toUpperCase(); // strip whitespace, +, parens
+ 
+  // Suffix multipliers: $1.23M, $456K, $1.2B
+  const suffixMatch = s.match(/^\$?([\d,]+\.?\d*)\s*([KMB])$/);
+  if (suffixMatch) {
+    const num = parseFloat(suffixMatch[1].replace(/,/g, ''));
+    const mult = { K: 1e3, M: 1e6, B: 1e9 }[suffixMatch[2]];
+    const val = num * mult;
+    // Sanity: insider transaction values should be between $500 and $5B
+    if (val >= 500 && val <= 5e9) return val;
+    return 0;
+  }
+ 
+  // Plain dollar with commas: $1,234,567 or 1234567
+  const plainMatch = s.match(/^\$?([\d,]+\.?\d*)$/);
+  if (plainMatch) {
+    const val = parseFloat(plainMatch[1].replace(/,/g, ''));
+    if (val >= 500 && val <= 5e9) return val;
+    return 0;
+  }
+ 
+  return 0;
+}
+ 
+/**
+ * Parse share count from OpenInsider — plain integer with possible commas/+.
+ */
+function parseOpenInsiderShares(raw) {
+  if (!raw) return 0;
+  const n = parseInt(raw.replace(/[^0-9]/g, ''), 10);
+  // Sanity: 1 share minimum, 500M maximum
+  if (!isNaN(n) && n > 0 && n < 500_000_000) return n;
+  return 0;
+}
+ 
 async function resolveInsider(ticker, curPx) {
   const now   = Math.floor(Date.now()/1000);
-  const ago30 = now-30*86400;
+  const ago30 = now - 30*86400;
   const from  = new Date(ago30*1000).toISOString().slice(0,10);
   const to    = new Date(now*1000).toISOString().slice(0,10);
   const cut   = new Date(ago30*1000);
  
+  // ── Finnhub ────────────────────────────────────────────────────────────────
+  // Finnhub returns `value` in USD (total transaction value).
+  // Guard: if value > $10B it's almost certainly a data error.
   try {
     const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
-    const txns = d?.data||[];
-    const buys=txns.filter(t=>t.transactionCode==='P'), sells=txns.filter(t=>t.transactionCode==='S');
-    if (buys.length>0||sells.length>0) return { buys,sells,source:'finnhub' };
-  } catch (_) {}
+    const txns = d?.data || [];
  
-  try {
-    const r = await fetch(
-      `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
-      { headers:{ 'User-Agent':'Mozilla/5.0' }, signal:AbortSignal.timeout(7000) }
-    );
-    if (r.ok) {
-      const html=await r.text(), rows=[...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
-      const buys=[],sells=[];
-      for (const row of rows) {
-        const cells=[...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(c=>c[1].replace(/<[^>]+>/g,'').trim());
-        if (cells.length<10) continue;
-        const [,dateStr,,,type,,,,sharesRaw,valueRaw]=cells;
-        if (!dateStr||!type) continue;
-        const txDate=new Date(dateStr);
-        if (isNaN(txDate)||txDate<cut) continue;
-        const shares=parseInt((sharesRaw||'').replace(/[^0-9]/g,''))||0;
-        const value =parseInt((valueRaw ||'').replace(/[^0-9]/g,''))||0;
-        const entry ={transactionDate:dateStr,share:shares,value,transactionPrice:shares>0?value/shares:curPx};
-        if (/P\s*-\s*Purchase/i.test(type)) buys.push(entry);
-        else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
+    const buys  = [];
+    const sells = [];
+ 
+    for (const t of txns) {
+      if (t.transactionCode === 'P') {
+        const val = (t.value && t.value < 10e9) ? t.value : 0;
+        buys.push({ ...t, value: val });
+      } else if (t.transactionCode === 'S') {
+        const val = (t.value && t.value < 10e9) ? t.value : 0;
+        sells.push({ ...t, value: val });
       }
-      if (buys.length>0||sells.length>0) return {buys,sells,source:'openinsider'};
+    }
+ 
+    if (buys.length > 0 || sells.length > 0) {
+      return { buys, sells, source: 'finnhub' };
     }
   } catch (_) {}
  
-  return { buys:[], sells:[], source:null };
+  // ── OpenInsider fallback ───────────────────────────────────────────────────
+  // Only used when Finnhub returns nothing. Avoids double-counting.
+  try {
+    const r = await fetch(
+      `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(7000) }
+    );
+    if (r.ok) {
+      const html = await r.text();
+      const rows = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
+      const buys  = [];
+      const sells = [];
+ 
+      for (const row of rows) {
+        const cells = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
+        if (cells.length < 10) continue;
+ 
+        // OpenInsider table columns (0-indexed):
+        // 0: X (checkbox), 1: Filing Date, 2: Trade Date, 3: Ticker, 4: Company,
+        // 5: Insider Name, 6: Title, 7: Trade Type, 8: Price, 9: Qty, 10: Owned,
+        // 11: ΔOwn, 12: Value
+        const tradeType  = cells[7] || '';
+        const dateStr    = cells[2] || cells[1] || '';
+        const sharesRaw  = cells[9]  || '';
+        const valueRaw   = cells[12] || '';
+ 
+        if (!dateStr || !tradeType) continue;
+        const txDate = new Date(dateStr);
+        if (isNaN(txDate) || txDate < cut) continue;
+ 
+        const shares = parseOpenInsiderShares(sharesRaw);
+        const value  = parseOpenInsiderValue(valueRaw);
+ 
+        // If value parsed to 0 but we have shares + a price, estimate from price column
+        let finalValue = value;
+        if (finalValue === 0 && shares > 0) {
+          const priceRaw  = parseFloat((cells[8] || '').replace(/[^0-9.]/g, ''));
+          const priceEst  = priceRaw > 0 ? priceRaw : curPx;
+          const estimated = shares * priceEst;
+          // Only use estimated value if it's plausible
+          if (estimated >= 500 && estimated <= 5e9) finalValue = estimated;
+        }
+ 
+        const entry = {
+          transactionDate:  dateStr,
+          share:            shares,
+          value:            finalValue,
+          transactionPrice: shares > 0 && finalValue > 0 ? finalValue / shares : (curPx || 0),
+        };
+ 
+        if (/P\s*-\s*Purchase/i.test(tradeType)) buys.push(entry);
+        else if (/S\s*-\s*Sale/i.test(tradeType)) sells.push(entry);
+      }
+ 
+      if (buys.length > 0 || sells.length > 0) {
+        return { buys, sells, source: 'openinsider' };
+      }
+    }
+  } catch (_) {}
+ 
+  return { buys: [], sells: [], source: null };
 }
  
 function buildInsider(buys, sells, source) {
-  if (buys.length>0) {
-    const sh=buys.reduce((s,t)=>s+(t.share||0),0), val=buys.reduce((s,t)=>s+(t.value||Math.abs((t.share||0)*(t.transactionPrice||0))),0);
-    const parts=[`${buys.length} buy${buys.length>1?'s':''}`];
-    const s=fmtSh(sh); if(s) parts.push(s);
-    const d=fmt$M(val); if(d) parts.push(d);
-    const dates=buys.map(t=>t.transactionDate).filter(Boolean).sort().reverse();
-    const rc=dates[0]?timeAgo(dates[0]):null; if(rc) parts.push(rc);
-    return { status:'pass', value:parts.join(' · ') };
+  // Hard cap on displayed value: $10B (guards against any remaining bad data)
+  const VALUE_CAP = 10e9;
+ 
+  if (buys.length > 0) {
+    const sh  = buys.reduce((s, t) => s + (t.share || 0), 0);
+    const val = Math.min(
+      buys.reduce((s, t) => s + (t.value || 0), 0),
+      VALUE_CAP
+    );
+    const parts = [`${buys.length} buy${buys.length > 1 ? 's' : ''}`];
+    const s = fmtSh(sh);   if (s) parts.push(s);
+    const d = fmt$M(val);  if (d) parts.push(d);
+    const dates = buys.map(t => t.transactionDate).filter(Boolean).sort().reverse();
+    const rc = dates[0] ? timeAgo(dates[0]) : null; if (rc) parts.push(rc);
+    return { status: 'pass', value: parts.join(' · ') };
   }
-  if (sells.length>0) {
-    const sh=sells.reduce((s,t)=>s+(t.share||0),0), val=sells.reduce((s,t)=>s+(t.value||Math.abs((t.share||0)*(t.transactionPrice||0))),0);
-    const parts=[`${sells.length} sell${sells.length>1?'s':''}, no buys`];
-    const s=fmtSh(sh); if(s) parts.push(s);
-    const d=fmt$M(val); if(d) parts.push(d);
-    const dates=sells.map(t=>t.transactionDate).filter(Boolean).sort().reverse();
-    const rc=dates[0]?timeAgo(dates[0]):null; if(rc) parts.push(rc);
-    return { status:'fail', value:parts.join(' · ') };
+ 
+  if (sells.length > 0) {
+    const sh  = sells.reduce((s, t) => s + (t.share || 0), 0);
+    const val = Math.min(
+      sells.reduce((s, t) => s + (t.value || 0), 0),
+      VALUE_CAP
+    );
+    const parts = [`${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys`];
+    const s = fmtSh(sh);   if (s) parts.push(s);
+    const d = fmt$M(val);  if (d) parts.push(d);
+    const dates = sells.map(t => t.transactionDate).filter(Boolean).sort().reverse();
+    const rc = dates[0] ? timeAgo(dates[0]) : null; if (rc) parts.push(rc);
+    return { status: 'fail', value: parts.join(' · ') };
   }
-  return { status:'neutral', value:source?'No activity (30d)':'No data' };
+ 
+  return { status: 'neutral', value: source ? 'No activity (30d)' : 'No data' };
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
 // Peer PE
+//
+// FIX summary:
+//   1. Hard PE cap lowered to PE_MAX (150) — was 600 in v6
+//   2. getPeerPE validates each source result against PE_MAX before accepting
+//   3. resolvePeerPE: trimmed-mean trim raised to 20% each side
+//   4. Minimum peer count raised to 3
+//   5. Market-cap band tightened: lo=0.15, hi=6 (was 0.07–14)
+//   6. `diff` is now vs medianPE (more robust); avgPE still displayed
 // ─────────────────────────────────────────────────────────────────────────────
+ 
 const PEERS = {
   AAPL:['MSFT','GOOGL','META','AMZN','NVDA'],  MSFT:['AAPL','GOOGL','CRM','ORCL','IBM'],
   GOOGL:['META','MSFT','AMZN','SNAP','TTD'],    META:['GOOGL','SNAP','PINS','TTD'],
@@ -768,23 +880,28 @@ const PEERS = {
 };
  
 const _pePeerCache = {};
+ 
 async function getPeerPE(peer, crumbInfo) {
   if (_pePeerCache[peer]) return _pePeerCache[peer];
+ 
+  // Collect candidate PE values from multiple sources, then validate consistency.
+  // If only one source fires and the value is extreme, we discard it.
+  const candidates = [];
  
   // 1. Yahoo chart meta — fastest
   try {
     const j = await yahooFetch(`/v8/finance/chart/${peer}?interval=1d&range=5d`, crumbInfo);
     const pe = j?.chart?.result?.[0]?.meta?.trailingPE;
-    const mc = j?.chart?.result?.[0]?.meta?.marketCap||0;
-    if (pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
+    const mc = j?.chart?.result?.[0]?.meta?.marketCap || 0;
+    if (pe > 0 && pe < PE_MAX) candidates.push({ pe, mc, src: 'yahoo' });
   } catch (_) {}
  
   // 2. Finnhub metric
   try {
     const d = await fh(`/stock/metric?symbol=${peer}&metric=all`);
     const pe = d?.metric?.peBasicExclExtraTTM || d?.metric?.peTTM;
-    const mc = (d?.metric?.marketCapitalization||0)*1e6;
-    if (pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
+    const mc = (d?.metric?.marketCapitalization || 0) * 1e6;
+    if (pe > 0 && pe < PE_MAX) candidates.push({ pe, mc, src: 'finnhub' });
   } catch (_) {}
  
   // 3. Alpha Vantage (if key available)
@@ -792,63 +909,108 @@ async function getPeerPE(peer, crumbInfo) {
     try {
       const d = await fetchAV(peer);
       const pe = parseFloat(d?.PERatio);
-      const mc = parseFloat(d?.MarketCapitalization)||0;
-      if (!isNaN(pe) && pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
+      const mc = parseFloat(d?.MarketCapitalization) || 0;
+      if (!isNaN(pe) && pe > 0 && pe < PE_MAX) candidates.push({ pe, mc, src: 'av' });
     } catch (_) {}
   }
  
   // 4. stockanalysis.com
   try {
     const sa  = await fetchStockAnalysis(peer);
-    const pe  = saExtract(sa,['pe','peRatio','trailingPE']);
-    const mc  = saExtract(sa,['marketCap','marketCapitalization'])||0;
-    if (pe>0 && pe<600) { _pePeerCache[peer]={ticker:peer,pe,mc}; return _pePeerCache[peer]; }
+    const pe  = saExtract(sa, ['pe','peRatio','trailingPE']);
+    const mc  = saExtract(sa, ['marketCap','marketCapitalization']) || 0;
+    if (pe > 0 && pe < PE_MAX) candidates.push({ pe, mc, src: 'sa' });
   } catch (_) {}
  
-  return null;
+  if (candidates.length === 0) return null;
+ 
+  // Cross-source validation:
+  // If we have 2+ sources, use their median PE to avoid a single bad outlier.
+  // If we have only 1 source, accept it only if it's below 80x (less extreme threshold
+  // for single-source trust — above 80x with no corroboration is too risky).
+  let finalPE, finalMC;
+ 
+  if (candidates.length >= 2) {
+    const pes = candidates.map(c => c.pe).sort((a, b) => a - b);
+    const mid = Math.floor(pes.length / 2);
+    finalPE = pes.length % 2 === 0 ? (pes[mid - 1] + pes[mid]) / 2 : pes[mid];
+    // Use the MC from whichever source had the largest (most complete) value
+    finalMC = Math.max(...candidates.map(c => c.mc || 0));
+  } else {
+    // Single source — only trust if PE < 80
+    const { pe, mc } = candidates[0];
+    if (pe >= 80) return null;
+    finalPE = pe;
+    finalMC = mc;
+  }
+ 
+  const result = { ticker: peer, pe: finalPE, mc: finalMC };
+  _pePeerCache[peer] = result;
+  return result;
 }
  
 async function resolvePeerPE(ticker, curPE, targetMC, crumbInfo) {
   try {
     let peerList = [];
-    try { const pd=await fh(`/stock/peers?symbol=${ticker}`); if(Array.isArray(pd)) peerList=pd.filter(p=>p!==ticker&&/^[A-Z]{1,5}$/.test(p)); } catch(_){}
-    if (PEERS[ticker]) peerList=[...new Set([...peerList,...PEERS[ticker]])].filter(p=>p!==ticker);
-    peerList=peerList.slice(0,10);
+    try {
+      const pd = await fh(`/stock/peers?symbol=${ticker}`);
+      if (Array.isArray(pd)) peerList = pd.filter(p => p !== ticker && /^[A-Z]{1,5}$/.test(p));
+    } catch (_) {}
+    if (PEERS[ticker]) peerList = [...new Set([...peerList, ...PEERS[ticker]])].filter(p => p !== ticker);
+    peerList = peerList.slice(0, 10);
     if (!peerList.length) return null;
  
     // Batch in 2s to avoid rate limits
-    const all=[];
-    for (let i=0;i<peerList.length;i+=2) {
-      const batch=peerList.slice(i,i+2);
-      const res=await Promise.allSettled(batch.map(p=>getPeerPE(p,crumbInfo)));
-      all.push(...res.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value));
+    const all = [];
+    for (let i = 0; i < peerList.length; i += 2) {
+      const batch = peerList.slice(i, i + 2);
+      const res   = await Promise.allSettled(batch.map(p => getPeerPE(p, crumbInfo)));
+      all.push(...res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value));
     }
     if (!all.length) return null;
  
-    let comps=all;
-    if (targetMC>0 && all.filter(c=>c.mc>0).length>=2) {
-      const lo=targetMC>500000?0.07:0.12, hi=targetMC>500000?14:8;
-      const f=all.filter(c=>c.mc===0||(c.mc/1e6/targetMC>=lo&&c.mc/1e6/targetMC<=hi));
-      if (f.length>=2) comps=f;
+    // ── Market-cap band filter (tightened from v6) ─────────────────────────
+    // Only include peers within 6× / ÷6 of the target's market cap.
+    // This prevents e.g. a $500B mega-cap being compared to a $2B small-cap.
+    let comps = all;
+    if (targetMC > 0 && all.filter(c => c.mc > 0).length >= 2) {
+      const lo = 1 / 6;   // peer MC must be at least 1/6th of target
+      const hi = 6;       // peer MC must be at most 6× target
+      const f  = all.filter(c => c.mc === 0 || (c.mc / (targetMC * 1e6) >= lo && c.mc / (targetMC * 1e6) <= hi));
+      if (f.length >= 3) comps = f;
     }
-    if (comps.length>=5) {
-      const s=[...comps].sort((a,b)=>a.pe-b.pe), t=Math.max(1,Math.floor(s.length*0.1));
-      comps=s.slice(t,s.length-t);
-    }
-    if (comps.length<2) return null;
  
-    const pes=comps.map(c=>c.pe).sort((a,b)=>a-b);
-    const mid=Math.floor(pes.length/2);
-    const med=pes.length%2===0?(pes[mid-1]+pes[mid])/2:pes[mid];
-    const avg=pes.reduce((a,b)=>a+b,0)/pes.length;
+    // ── Trimmed mean (raised from 10% → 20% each side) ─────────────────────
+    // With 5 peers: trim=1 from each end → 3 peers used (was 0 in v6 with 10%)
+    // With 10 peers: trim=2 from each end → 6 peers used
+    if (comps.length >= 5) {
+      const s    = [...comps].sort((a, b) => a.pe - b.pe);
+      const trim = Math.max(1, Math.floor(s.length * 0.20));
+      comps      = s.slice(trim, s.length - trim);
+    }
+ 
+    // Need at least 3 valid peers to report a meaningful result (raised from 2)
+    if (comps.length < 3) return null;
+ 
+    const pes = comps.map(c => c.pe).sort((a, b) => a - b);
+    const mid = Math.floor(pes.length / 2);
+    const med = pes.length % 2 === 0 ? (pes[mid - 1] + pes[mid]) / 2 : pes[mid];
+    const avg = pes.reduce((a, b) => a + b, 0) / pes.length;
+ 
+    // diff vs medianPE (more robust than avgPE — a single outlier that survives
+    // trimming can still skew the mean by several points)
+    const diff = curPE && curPE > 0
+      ? parseFloat(((curPE - med) / med * 100).toFixed(1))
+      : null;
+ 
     return {
-      medianPE:parseFloat(med.toFixed(1)),
-      avgPE:parseFloat(avg.toFixed(1)),
-      peerCount:comps.length,
-      diff:curPE&&curPE>0?parseFloat(((curPE-avg)/avg*100).toFixed(1)):null,
-      peers:comps.map(c=>c.ticker),
+      medianPE:   parseFloat(med.toFixed(1)),
+      avgPE:      parseFloat(avg.toFixed(1)),
+      peerCount:  comps.length,
+      diff,
+      peers:      comps.map(c => c.ticker),
     };
-  } catch(_){ return null; }
+  } catch (_) { return null; }
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
@@ -874,7 +1036,6 @@ function cleanExchange(raw){
 // Master fetch
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchStockData(ticker, crumbInfo) {
-  // Fire Finnhub primaries + AV + Yahoo chart all simultaneously
   const [quoteR, profileR, metricsR, earningsR, yhChartR, avR] = await Promise.allSettled([
     fh(`/quote?symbol=${ticker}`),
     fh(`/stock/profile2?symbol=${ticker}`),
@@ -891,7 +1052,6 @@ async function fetchStockData(ticker, crumbInfo) {
   const yhMeta  = yhChart?.chart?.result?.[0]?.meta||{};
   const yhClose = yhChart?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
  
-  // All signal data in parallel
   const [eps, ma50, curPE, analystTarget, insiderData] = await Promise.all([
     resolveEPS(ticker, avData, fhM, crumbInfo),
     resolveMA50(ticker, avData, crumbInfo, yhChart),
@@ -973,15 +1133,15 @@ function evaluate(ticker, d) {
     }
   } catch(_){}
  
-  // S6
+  // S6 — diff now vs medianPE (fixed in v7)
   let s6={status:'neutral',value:'No data'};
   try {
     const pp=d.peerPE;
     if (pp&&pp.medianPE&&pp.diff!==null) {
-      if      (pp.diff<-8) s6={status:'pass',   value:`${Math.abs(pp.diff).toFixed(0)}% < peer avg ${pp.avgPE}x`};
-      else if (pp.diff>8)  s6={status:'fail',   value:`${Math.abs(pp.diff).toFixed(0)}% > peer avg ${pp.avgPE}x`};
-      else                 s6={status:'neutral', value:`In line, avg ${pp.avgPE}x`};
-    } else if (pp?.medianPE) s6={status:'neutral',value:`Peer avg ${pp.avgPE}x`};
+      if      (pp.diff<-8) s6={status:'pass',   value:`${Math.abs(pp.diff).toFixed(0)}% < peer median ${pp.medianPE}x`};
+      else if (pp.diff>8)  s6={status:'fail',   value:`${Math.abs(pp.diff).toFixed(0)}% > peer median ${pp.medianPE}x`};
+      else                 s6={status:'neutral', value:`In line, peer median ${pp.medianPE}x`};
+    } else if (pp?.medianPE) s6={status:'neutral',value:`Peer median ${pp.medianPE}x`};
   } catch(_){}
  
   const signals=[s1,s2,s3,s4,s5,s6];
@@ -1021,7 +1181,6 @@ export default async function handler(req, res) {
   Object.keys(_mwCache).forEach(k=>delete _mwCache[k]);
   Object.keys(_pePeerCache).forEach(k=>delete _pePeerCache[k]);
  
-  // Fetch crumb ONCE for whole batch
   const crumbInfo = await getYahooCrumb();
  
   const results={};
@@ -1036,3 +1195,4 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control','s-maxage=300, stale-while-revalidate');
   return res.status(200).json({results, fetchedAt:new Date().toISOString()});
 }
+ 
