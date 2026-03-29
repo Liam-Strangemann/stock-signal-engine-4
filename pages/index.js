@@ -33,8 +33,6 @@ const FONTS="'Cormorant Garamond','Georgia',serif";
 const SANS ="'DM Sans','Helvetica Neue',sans-serif";
 const MONO ="'DM Mono','Courier New',monospace";
  
-// ── Shared rating + score colour helpers ──────────────────────────────────────
-// scoreColor: used in BOTH FeatureCard and ResultCard — must match exactly
 function scoreColor(sc, dark=false) {
   if (sc >= 5) return C.gold;
   if (sc >= 4) return dark ? '#A8C080' : C.green;
@@ -49,12 +47,7 @@ function getRating(sc) {
   return               { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
-// ── ScoreDots ─────────────────────────────────────────────────────────────────
-// FIX: filled dots always render a solid visible colour based on score tier.
-// Previously score 0 used C.txLight which is the same as the empty ring colour,
-// making all dots look hollow. Now even score=1 dots show a muted gold tint.
 function ScoreDots({ score, max=6, dark=false }) {
-  // Colour for filled dots — tier-matched, always solid
   const filled = score >= 5 ? C.gold
                : score >= 4 ? (dark ? '#A8C080' : C.green)
                : score >= 3 ? (dark ? '#C8A870' : C.amber)
@@ -76,21 +69,50 @@ function ScoreDots({ score, max=6, dark=false }) {
 }
  
 // ── SigPill ───────────────────────────────────────────────────────────────────
-function SigPill({ sig, label, dark=false }) {
+// No-data pills show "tap to load" with a dashed border and become clickable.
+// While fetching, a spinner replaces the dot and text reads "fetching…".
+function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }) {
+  const noData = !sig.value || sig.value === '--' || sig.value === 'No data';
   const p = sig.status === 'pass', f = sig.status === 'fail';
+ 
   const bg  = dark ? p?C.dkGreenBg : f?C.dkRedBg  : C.dkAmberBg
                    : p?C.greenBg   : f?C.redBg     : C.amberBg;
   const col = dark ? p?C.dkGreen   : f?C.dkRed     : C.dkAmber
                    : p?C.green     : f?C.red        : C.amber;
   const bd  = dark ? p?C.dkGreenBd : f?C.dkRedBd   : C.dkAmberBd
                    : p?C.greenBd   : f?C.redBd      : C.amberBd;
+ 
+  const noDataBg  = dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
+  const noDataBd  = dark ? 'rgba(95,94,86,0.35)'    : C.borderDk;
+  const noDataCol = dark ? 'rgba(154,152,144,0.5)'   : C.txLight;
+  const spinCol   = dark ? C.gold : C.amber;
+ 
+  const isClickable = noData && onRetry && !loading;
+ 
   return (
-    <div style={{ background:bg, border:`0.5px solid ${bd}`, borderRadius:5, padding:'5px 7px' }}>
+    <div
+      onClick={isClickable ? () => onRetry(signalIndex) : undefined}
+      title={isClickable ? `Click to fetch ${label}` : undefined}
+      style={{
+        background:   noData ? noDataBg : bg,
+        border:       noData ? `0.5px dashed ${noDataBd}` : `0.5px solid ${bd}`,
+        borderRadius: 5,
+        padding:      '5px 7px',
+        cursor:       isClickable ? 'pointer' : 'default',
+        opacity:      loading ? 0.6 : 1,
+        transition:   'opacity 0.15s',
+      }}
+    >
       <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:3 }}>
-        <div style={{ width:4, height:4, borderRadius:'50%', background:col, flexShrink:0 }}/>
+        {loading
+          ? <div style={{ width:7, height:7, borderRadius:'50%', border:`1.5px solid transparent`, borderTopColor:spinCol, flexShrink:0, animation:'spin 0.7s linear infinite' }}/>
+          : <div style={{ width:4, height:4, borderRadius:'50%', background: noData ? noDataCol : col, flexShrink:0 }}/>
+        }
         <div style={{ fontSize:7.5, color:dark?'rgba(154,152,144,0.75)':C.txLight, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em', lineHeight:1 }}>{label}</div>
       </div>
-      <div style={{ fontSize:10, fontWeight:500, color:col, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>{sig.value||'--'}</div>
+      <div style={{ fontSize:10, fontWeight:500, color: noData ? noDataCol : col, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>
+        {loading ? 'fetching…' : noData ? 'tap to load' : (sig.value || '--')}
+      </div>
     </div>
   );
 }
@@ -114,48 +136,34 @@ function SkeletonCard() {
 }
  
 // ── FeatureCard ───────────────────────────────────────────────────────────────
-// Changes vs previous version:
-//  1. "NEW" badge replaced with exchange badge (same style as ResultCard)
-//  2. Rating pill added next to exchange badge (Strong Buy / Buy / Watch / Ignore)
-//  3. Score number colour now uses shared scoreColor() — matches ResultCard exactly
-//  4. ScoreDots now uses corrected filled-dot logic
-function FeatureCard({ stock, rank }) {
+function FeatureCard({ stock, rank, onSignalRetry }) {
   if (!stock) return <SkeletonCard/>;
   const sc     = Math.min(stock.score || 0, 6);
   const rating = getRating(sc);
   const chgPos = stock.change?.startsWith('+');
   const medals = ['I','II','III'];
-  const sc_col = scoreColor(sc, true);  // dark=true for dark card
+  const sc_col = scoreColor(sc, true);
   const exchange = stock.exchange || (US_SET.has(stock.ticker) ? 'NYSE' : 'INTL');
  
   return (
     <div style={{ background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:`3px solid ${C.gold}`, borderRadius:2, padding:'24px 22px', position:'relative', animation:'fadeUp 0.4s ease both', display:'flex', flexDirection:'column', height:'100%' }}>
- 
-      {/* Top row: ticker info left, score right */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16 }}>
- 
-        {/* Left: rank label, ticker, exchange + rating badges, company */}
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:6 }}>
             Rank {medals[rank-1]}
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5, flexWrap:'wrap' }}>
             <span style={{ fontSize:26, fontWeight:700, fontFamily:FONTS, color:'#F1EFE8', letterSpacing:'0.02em' }}>{stock.ticker}</span>
-            {/* Exchange badge — dark gold tinted, same as before */}
             <span style={{ fontSize:9, fontFamily:SANS, padding:'2px 6px', borderRadius:2, letterSpacing:'0.08em', background:'rgba(184,160,112,0.15)', color:C.gold, border:'0.5px solid rgba(184,160,112,0.3)', flexShrink:0 }}>
               {exchange}
             </span>
-            {/* Rating pill — matches the style in ResultCard exactly */}
             <span style={{ fontSize:8, fontFamily:SANS, fontWeight:600, padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em', textTransform:'uppercase', background:rating.bg, color:rating.color, border:`0.5px solid ${rating.border}`, flexShrink:0 }}>
               {rating.label}
             </span>
           </div>
           <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company||''}</div>
         </div>
- 
-        {/* Right: score number + dots */}
         <div style={{ textAlign:'right', flexShrink:0, marginLeft:12 }}>
-          {/* Score number — colour matches scoreColor() used in ResultCard */}
           <div style={{ fontSize:26, fontWeight:400, fontFamily:MONO, color:sc_col, lineHeight:1 }}>
             {sc}<span style={{ color:'rgba(154,152,144,0.5)' }}>/6</span>
           </div>
@@ -164,28 +172,30 @@ function FeatureCard({ stock, rank }) {
           </div>
         </div>
       </div>
- 
-      {/* Price row */}
       <div style={{ marginBottom:14 }}>
         <span style={{ fontSize:18, fontFamily:MONO, fontWeight:400, color:'#F1EFE8' }}>{stock.price||'--'}</span>
         {stock.change && <span style={{ fontSize:12, marginLeft:8, color:chgPos?'#80C080':C.red, fontFamily:MONO }}>{stock.change}</span>}
         {stock.marketCap && <span style={{ fontSize:11, marginLeft:8, color:C.txLight, fontFamily:SANS }}>{stock.marketCap}</span>}
       </div>
- 
-      {/* 6 signal pills */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
         {SIG_LABELS.map((label,i) => {
           const sig = (stock.signals||[])[i]||{};
-          return <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label} dark/>;
+          return (
+            <SigPill
+              key={i}
+              sig={{ status:sig.status, value:sig.value }}
+              label={label}
+              dark
+              signalIndex={i}
+              loading={sig._loading || false}
+              onRetry={onSignalRetry ? (idx) => onSignalRetry(stock.ticker, idx) : undefined}
+            />
+          );
         })}
       </div>
- 
-      {/* Summary — flex:1 makes all cards same height */}
       <div style={{ flex:1, minHeight:44, padding:'10px 12px', background:'rgba(241,239,232,0.04)', borderRadius:2, border:'0.5px solid rgba(184,160,112,0.2)' }}>
         <span style={{ fontSize:11, color:C.txLight, fontFamily:SANS, lineHeight:1.55 }}>{stock.summary||''}</span>
       </div>
- 
-      {/* Timestamp */}
       <div style={{ position:'absolute', top:14, right:18, fontSize:9, color:'rgba(154,152,144,0.5)', fontFamily:MONO }}>
         {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
       </div>
@@ -194,11 +204,11 @@ function FeatureCard({ stock, rank }) {
 }
  
 // ── ResultCard ────────────────────────────────────────────────────────────────
-function ResultCard({ stock, rank }) {
+function ResultCard({ stock, rank, onSignalRetry }) {
   const sc     = Math.min(stock.score||0, 6);
   const rating = getRating(sc);
   const chgPos = stock.change?.startsWith('+');
-  const sc_col = scoreColor(sc, false);  // light card
+  const sc_col = scoreColor(sc, false);
   const accentL = sc>=5?C.gold : sc>=4?C.greenBd : sc>=3?C.amberBd : C.borderDk;
   const rnk = rank===1?{bg:C.gold,color:'#2C2C2A'} : rank===2?{bg:C.accent,color:'#F1EFE8'} : rank===3?{bg:C.accentDk,color:'#F1EFE8'} : {bg:C.border,color:C.txMid};
  
@@ -237,7 +247,16 @@ function ResultCard({ stock, rank }) {
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:4, marginBottom:8 }}>
         {SIG_LABELS.map((label,i) => {
           const sig = (stock.signals||[])[i]||{};
-          return <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label}/>;
+          return (
+            <SigPill
+              key={i}
+              sig={{ status:sig.status, value:sig.value }}
+              label={label}
+              signalIndex={i}
+              loading={sig._loading || false}
+              onRetry={onSignalRetry ? (idx) => onSignalRetry(stock.ticker, idx) : undefined}
+            />
+          );
         })}
       </div>
       {stock.summary && (
@@ -279,9 +298,6 @@ export default function Home() {
         if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
         const { results:res } = await ar.json();
         if (!live) return;
-        // Merge exchange from stockMeta into each result — analyse.js gets it from
-        // Finnhub profile2, but stockMeta from top3 is a reliable second source.
-        // Whichever is truthy wins; this fixes the "NEW" badge for all cases.
         const merged = Object.fromEntries(
           Object.entries(res||{}).map(([ticker, stock]) => {
             if (!stock) return [ticker, stock];
@@ -298,6 +314,50 @@ export default function Home() {
     })();
     return () => { live = false; };
   }, []);
+ 
+  // ── Per-signal retry ──────────────────────────────────────────────────────
+  // Marks that pill as loading, calls /api/analyse-signal, patches result in state.
+  // Works for both the top-picks array and the custom scan results array.
+  const retrySignal = useCallback(async (ticker, signalIndex, isTopPick) => {
+    const setState = isTopPick ? setTopPicks : setResults;
+ 
+    // Mark loading
+    setState(prev => prev.map(stock => {
+      if (!stock || stock.ticker !== ticker) return stock;
+      const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
+      signals[signalIndex] = { ...signals[signalIndex], _loading: true };
+      return { ...stock, signals };
+    }));
+ 
+    try {
+      const res  = await fetch('/api/analyse-signal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker, signalIndex }),
+      });
+      const data   = await res.json();
+      const newSig = data?.signal || { status:'neutral', value:'No data' };
+ 
+      setState(prev => prev.map(stock => {
+        if (!stock || stock.ticker !== ticker) return stock;
+        const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
+        signals[signalIndex] = { ...newSig, _loading: false };
+        const score = signals.filter(s => s.status === 'pass').length;
+        return { ...stock, signals, score };
+      }));
+    } catch (_) {
+      // Clear loading flag without changing value
+      setState(prev => prev.map(stock => {
+        if (!stock || stock.ticker !== ticker) return stock;
+        const signals = [...(stock.signals || [])];
+        if (signals[signalIndex]) signals[signalIndex] = { ...signals[signalIndex], _loading: false };
+        return { ...stock, signals };
+      }));
+    }
+  }, []);
+ 
+  const retryTopSignal    = useCallback((ticker, idx) => retrySignal(ticker, idx, true),  [retrySignal]);
+  const retryResultSignal = useCallback((ticker, idx) => retrySignal(ticker, idx, false), [retrySignal]);
  
   const scan = useCallback(async (tickers) => {
     setScanning(true); setStatus(`Analysing ${tickers.length} securities…`);
@@ -386,7 +446,7 @@ export default function Home() {
               <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}>
-              {[0,1,2].map(i => <FeatureCard key={i} stock={topPicks[i]} rank={i+1}/>)}
+              {[0,1,2].map(i => <FeatureCard key={i} stock={topPicks[i]} rank={i+1} onSignalRetry={retryTopSignal}/>)}
             </div>
           </div>
  
@@ -439,7 +499,7 @@ export default function Home() {
             </div>
           ) : (
             <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-              {filtered.map((stock,i) => <ResultCard key={stock.ticker} stock={stock} rank={i+1}/>)}
+              {filtered.map((stock,i) => <ResultCard key={stock.ticker} stock={stock} rank={i+1} onSignalRetry={retryResultSignal}/>)}
             </div>
           )}
  
