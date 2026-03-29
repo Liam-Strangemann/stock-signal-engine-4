@@ -69,12 +69,14 @@ function ScoreDots({ score, max=6, dark=false }) {
 }
  
 // ── SigPill ───────────────────────────────────────────────────────────────────
-// No-data pills show "tap to load" with a dashed border and become clickable.
-// While fetching, a spinner replaces the dot and text reads "fetching…".
+// Pill colours are identical to the original for pass/fail/neutral.
+// When value is missing/no-data the pill gets a dashed border and is clickable.
+// While retrying a spinner appears. Text shows "no data, tap to retry".
 function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }) {
-  const noData = !sig.value || sig.value === '--' || sig.value === 'No data';
+  const noData = loading || !sig.value || sig.value === '--' || sig.value === 'No data';
   const p = sig.status === 'pass', f = sig.status === 'fail';
  
+  // ── Original colours (unchanged) ──
   const bg  = dark ? p?C.dkGreenBg : f?C.dkRedBg  : C.dkAmberBg
                    : p?C.greenBg   : f?C.redBg     : C.amberBg;
   const col = dark ? p?C.dkGreen   : f?C.dkRed     : C.dkAmber
@@ -82,36 +84,45 @@ function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }
   const bd  = dark ? p?C.dkGreenBd : f?C.dkRedBd   : C.dkAmberBd
                    : p?C.greenBd   : f?C.redBd      : C.amberBd;
  
-  const noDataBg  = dark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
-  const noDataBd  = dark ? 'rgba(95,94,86,0.35)'    : C.borderDk;
-  const noDataCol = dark ? 'rgba(154,152,144,0.5)'   : C.txLight;
-  const spinCol   = dark ? C.gold : C.amber;
+  const isClickable = noData && !loading && onRetry;
  
-  const isClickable = noData && onRetry && !loading;
+  // No-data state uses same amber background as neutral, but dashed border
+  const pillBg  = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
+    ? (dark ? C.dkAmberBg : C.amberBg)
+    : bg;
+  const pillCol = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
+    ? (dark ? C.dkAmber : C.amber)
+    : col;
+  const pillBd  = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
+    ? `0.5px dashed ${dark ? C.dkAmberBd : C.amberBd}`
+    : `0.5px solid ${bd}`;
  
   return (
     <div
       onClick={isClickable ? () => onRetry(signalIndex) : undefined}
-      title={isClickable ? `Click to fetch ${label}` : undefined}
+      title={isClickable ? `Click to retry ${label}` : undefined}
       style={{
-        background:   noData ? noDataBg : bg,
-        border:       noData ? `0.5px dashed ${noDataBd}` : `0.5px solid ${bd}`,
+        background:   pillBg,
+        border:       pillBd,
         borderRadius: 5,
         padding:      '5px 7px',
         cursor:       isClickable ? 'pointer' : 'default',
-        opacity:      loading ? 0.6 : 1,
         transition:   'opacity 0.15s',
       }}
     >
       <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:3 }}>
         {loading
-          ? <div style={{ width:7, height:7, borderRadius:'50%', border:`1.5px solid transparent`, borderTopColor:spinCol, flexShrink:0, animation:'spin 0.7s linear infinite' }}/>
-          : <div style={{ width:4, height:4, borderRadius:'50%', background: noData ? noDataCol : col, flexShrink:0 }}/>
+          ? <div style={{ width:7, height:7, borderRadius:'50%', border:`1.5px solid ${pillCol}`, borderTopColor:'transparent', flexShrink:0, animation:'spin 0.7s linear infinite' }}/>
+          : <div style={{ width:4, height:4, borderRadius:'50%', background:pillCol, flexShrink:0 }}/>
         }
         <div style={{ fontSize:7.5, color:dark?'rgba(154,152,144,0.75)':C.txLight, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em', lineHeight:1 }}>{label}</div>
       </div>
-      <div style={{ fontSize:10, fontWeight:500, color: noData ? noDataCol : col, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>
-        {loading ? 'fetching…' : noData ? 'tap to load' : (sig.value || '--')}
+      <div style={{ fontSize:10, fontWeight:500, color:pillCol, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>
+        {loading
+          ? 'fetching…'
+          : (!sig.value || sig.value === '--' || sig.value === 'No data')
+            ? 'no data, tap to retry'
+            : sig.value}
       </div>
     </div>
   );
@@ -316,27 +327,28 @@ export default function Home() {
   }, []);
  
   // ── Per-signal retry ──────────────────────────────────────────────────────
-  // Marks that pill as loading, calls /api/analyse-signal, patches result in state.
-  // Works for both the top-picks array and the custom scan results array.
+  // Re-uses /api/analyse for a single ticker — guaranteed to use identical
+  // fetcher logic. Splices just the one updated signal back into state.
   const retrySignal = useCallback(async (ticker, signalIndex, isTopPick) => {
     const setState = isTopPick ? setTopPicks : setResults;
  
-    // Mark loading
+    // Mark that pill as loading
     setState(prev => prev.map(stock => {
       if (!stock || stock.ticker !== ticker) return stock;
       const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
-      signals[signalIndex] = { ...signals[signalIndex], _loading: true };
+      signals[signalIndex] = { ...(signals[signalIndex] || {}), _loading: true };
       return { ...stock, signals };
     }));
  
     try {
-      const res  = await fetch('/api/analyse-signal', {
-        method: 'POST',
+      const res  = await fetch('/api/analyse', {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticker, signalIndex }),
+        body:    JSON.stringify({ tickers: [ticker] }),
       });
-      const data   = await res.json();
-      const newSig = data?.signal || { status:'neutral', value:'No data' };
+      const data    = await res.json();
+      const fresh   = data?.results?.[ticker];
+      const newSig  = fresh?.signals?.[signalIndex] || { status:'neutral', value:'No data' };
  
       setState(prev => prev.map(stock => {
         if (!stock || stock.ticker !== ticker) return stock;
@@ -346,7 +358,7 @@ export default function Home() {
         return { ...stock, signals, score };
       }));
     } catch (_) {
-      // Clear loading flag without changing value
+      // Clear loading without changing value so pill stays retryable
       setState(prev => prev.map(stock => {
         if (!stock || stock.ticker !== ticker) return stock;
         const signals = [...(stock.signals || [])];
