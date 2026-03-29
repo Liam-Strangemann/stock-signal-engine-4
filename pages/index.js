@@ -34,6 +34,7 @@ const SANS ="'DM Sans','Helvetica Neue',sans-serif";
 const MONO ="'DM Mono','Courier New',monospace";
  
 // ── Shared rating + score colour helpers ──────────────────────────────────────
+// scoreColor: used in BOTH FeatureCard and ResultCard — must match exactly
 function scoreColor(sc, dark=false) {
   if (sc >= 5) return C.gold;
   if (sc >= 4) return dark ? '#A8C080' : C.green;
@@ -49,7 +50,11 @@ function getRating(sc) {
 }
  
 // ── ScoreDots ─────────────────────────────────────────────────────────────────
+// FIX: filled dots always render a solid visible colour based on score tier.
+// Previously score 0 used C.txLight which is the same as the empty ring colour,
+// making all dots look hollow. Now even score=1 dots show a muted gold tint.
 function ScoreDots({ score, max=6, dark=false }) {
+  // Colour for filled dots — tier-matched, always solid
   const filled = score >= 5 ? C.gold
                : score >= 4 ? (dark ? '#A8C080' : C.green)
                : score >= 3 ? (dark ? '#C8A870' : C.amber)
@@ -109,34 +114,48 @@ function SkeletonCard() {
 }
  
 // ── FeatureCard ───────────────────────────────────────────────────────────────
+// Changes vs previous version:
+//  1. "NEW" badge replaced with exchange badge (same style as ResultCard)
+//  2. Rating pill added next to exchange badge (Strong Buy / Buy / Watch / Ignore)
+//  3. Score number colour now uses shared scoreColor() — matches ResultCard exactly
+//  4. ScoreDots now uses corrected filled-dot logic
 function FeatureCard({ stock, rank }) {
   if (!stock) return <SkeletonCard/>;
   const sc     = Math.min(stock.score || 0, 6);
   const rating = getRating(sc);
   const chgPos = stock.change?.startsWith('+');
   const medals = ['I','II','III'];
-  const sc_col = scoreColor(sc, true);
+  const sc_col = scoreColor(sc, true);  // dark=true for dark card
   const exchange = stock.exchange || (US_SET.has(stock.ticker) ? 'NYSE' : 'INTL');
  
   return (
     <div style={{ background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:`3px solid ${C.gold}`, borderRadius:2, padding:'24px 22px', position:'relative', animation:'fadeUp 0.4s ease both', display:'flex', flexDirection:'column', height:'100%' }}>
+ 
+      {/* Top row: ticker info left, score right */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16 }}>
+ 
+        {/* Left: rank label, ticker, exchange + rating badges, company */}
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:6 }}>
             Rank {medals[rank-1]}
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5, flexWrap:'wrap' }}>
             <span style={{ fontSize:26, fontWeight:700, fontFamily:FONTS, color:'#F1EFE8', letterSpacing:'0.02em' }}>{stock.ticker}</span>
+            {/* Exchange badge — dark gold tinted, same as before */}
             <span style={{ fontSize:9, fontFamily:SANS, padding:'2px 6px', borderRadius:2, letterSpacing:'0.08em', background:'rgba(184,160,112,0.15)', color:C.gold, border:'0.5px solid rgba(184,160,112,0.3)', flexShrink:0 }}>
               {exchange}
             </span>
+            {/* Rating pill — matches the style in ResultCard exactly */}
             <span style={{ fontSize:8, fontFamily:SANS, fontWeight:600, padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em', textTransform:'uppercase', background:rating.bg, color:rating.color, border:`0.5px solid ${rating.border}`, flexShrink:0 }}>
               {rating.label}
             </span>
           </div>
           <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company||''}</div>
         </div>
+ 
+        {/* Right: score number + dots */}
         <div style={{ textAlign:'right', flexShrink:0, marginLeft:12 }}>
+          {/* Score number — colour matches scoreColor() used in ResultCard */}
           <div style={{ fontSize:26, fontWeight:400, fontFamily:MONO, color:sc_col, lineHeight:1 }}>
             {sc}<span style={{ color:'rgba(154,152,144,0.5)' }}>/6</span>
           </div>
@@ -145,20 +164,28 @@ function FeatureCard({ stock, rank }) {
           </div>
         </div>
       </div>
+ 
+      {/* Price row */}
       <div style={{ marginBottom:14 }}>
         <span style={{ fontSize:18, fontFamily:MONO, fontWeight:400, color:'#F1EFE8' }}>{stock.price||'--'}</span>
         {stock.change && <span style={{ fontSize:12, marginLeft:8, color:chgPos?'#80C080':C.red, fontFamily:MONO }}>{stock.change}</span>}
         {stock.marketCap && <span style={{ fontSize:11, marginLeft:8, color:C.txLight, fontFamily:SANS }}>{stock.marketCap}</span>}
       </div>
+ 
+      {/* 6 signal pills */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
         {SIG_LABELS.map((label,i) => {
           const sig = (stock.signals||[])[i]||{};
           return <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label} dark/>;
         })}
       </div>
+ 
+      {/* Summary — flex:1 makes all cards same height */}
       <div style={{ flex:1, minHeight:44, padding:'10px 12px', background:'rgba(241,239,232,0.04)', borderRadius:2, border:'0.5px solid rgba(184,160,112,0.2)' }}>
         <span style={{ fontSize:11, color:C.txLight, fontFamily:SANS, lineHeight:1.55 }}>{stock.summary||''}</span>
       </div>
+ 
+      {/* Timestamp */}
       <div style={{ position:'absolute', top:14, right:18, fontSize:9, color:'rgba(154,152,144,0.5)', fontFamily:MONO }}>
         {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
       </div>
@@ -171,7 +198,7 @@ function ResultCard({ stock, rank }) {
   const sc     = Math.min(stock.score||0, 6);
   const rating = getRating(sc);
   const chgPos = stock.change?.startsWith('+');
-  const sc_col = scoreColor(sc, false);
+  const sc_col = scoreColor(sc, false);  // light card
   const accentL = sc>=5?C.gold : sc>=4?C.greenBd : sc>=3?C.amberBd : C.borderDk;
   const rnk = rank===1?{bg:C.gold,color:'#2C2C2A'} : rank===2?{bg:C.accent,color:'#F1EFE8'} : rank===3?{bg:C.accentDk,color:'#F1EFE8'} : {bg:C.border,color:C.txMid};
  
@@ -237,39 +264,40 @@ export default function Home() {
   const [activePreset,setActivePreset] = useState('');
   const [topPicks,setTopPicks]         = useState([null,null,null]);
   const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
-  const [topRefreshing,setTopRefreshing] = useState(false);
   const timerRef=useRef(null), tickersRef=useRef([]);
  
-  const loadTopPicks = useCallback(async () => {
-    setTopRefreshing(true);
-    setTopPicks([null,null,null]);
-    setTopStatus('Scanning ~200 securities…');
-    try {
-      const sr = await fetch('/api/top3');
-      if (!sr.ok) { setTopStatus('Could not load top picks'); return; }
-      const { candidates, totalScanned, stockMeta = {} } = await sr.json();
-      if (!candidates?.length) { setTopStatus('No candidates found'); return; }
-      setTopStatus(`Analysing top ${candidates.length} picks…`);
-      const ar = await fetch('/api/analyse', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers:candidates}) });
-      if (!ar.ok) { setTopStatus('Analysis failed'); return; }
-      const { results:res } = await ar.json();
-      const merged = Object.fromEntries(
-        Object.entries(res||{}).map(([ticker, stock]) => {
-          if (!stock) return [ticker, stock];
-          const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
-            ? stock.exchange
-            : (stockMeta[ticker]?.exchange || stock.exchange);
-          return [ticker, { ...stock, exchange }];
-        })
-      );
-      const sorted = Object.values(merged).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0));
-      setTopPicks([sorted[0]||null, sorted[1]||null, sorted[2]||null]);
-      setTopStatus(`${totalScanned||candidates.length} securities screened`);
-    } catch(_) { setTopStatus('Could not load top picks'); }
-    finally { setTopRefreshing(false); }
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const sr = await fetch('/api/top3');
+        if (!live||!sr.ok) { if(live) setTopStatus('Could not load top picks'); return; }
+        const { candidates, totalScanned, stockMeta = {} } = await sr.json();
+        if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
+        setTopStatus(`Analysing top ${candidates.length} picks…`);
+        const ar = await fetch('/api/analyse', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers:candidates}) });
+        if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
+        const { results:res } = await ar.json();
+        if (!live) return;
+        // Merge exchange from stockMeta into each result — analyse.js gets it from
+        // Finnhub profile2, but stockMeta from top3 is a reliable second source.
+        // Whichever is truthy wins; this fixes the "NEW" badge for all cases.
+        const merged = Object.fromEntries(
+          Object.entries(res||{}).map(([ticker, stock]) => {
+            if (!stock) return [ticker, stock];
+            const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
+              ? stock.exchange
+              : (stockMeta[ticker]?.exchange || stock.exchange);
+            return [ticker, { ...stock, exchange }];
+          })
+        );
+        const sorted = Object.values(merged).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0));
+        setTopPicks([sorted[0]||null, sorted[1]||null, sorted[2]||null]);
+        setTopStatus(`${totalScanned||candidates.length} securities screened`);
+      } catch(_) { if(live) setTopStatus('Could not load top picks'); }
+    })();
+    return () => { live = false; };
   }, []);
- 
-  useEffect(() => { loadTopPicks(); }, [loadTopPicks]);
  
   const scan = useCallback(async (tickers) => {
     setScanning(true); setStatus(`Analysing ${tickers.length} securities…`);
@@ -352,21 +380,11 @@ export default function Home() {
  
           {/* ── Top Picks ── */}
           <div style={{ marginBottom:40 }}>
- 
-            {/* Header row: title · status text · divider line · refresh button */}
-            <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:20 }}>
-              <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em', flexShrink:0 }}>Top Picks Today</h2>
-              <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap', flexShrink:0, marginBottom:2 }}>{topStatus}</div>
+            <div style={{ display:'flex', alignItems:'baseline', gap:16, marginBottom:20 }}>
+              <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>Top Picks Today</h2>
               <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
-              <button
-                onClick={loadTopPicks}
-                disabled={topRefreshing}
-                style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS, letterSpacing:'0.06em', flexShrink:0 }}
-              >
-                {topRefreshing ? 'Refreshing…' : 'Refresh'}
-              </button>
+              <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
             </div>
- 
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}>
               {[0,1,2].map(i => <FeatureCard key={i} stock={topPicks[i]} rank={i+1}/>)}
             </div>
