@@ -12,8 +12,7 @@ const PRESETS = {
   'Dividend':     'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
  
-// Updated: S6 label now clearly says "% vs Peers" to reflect the new diff display
-const SIG_LABELS = ['EPS & Rev beat','PE vs hist avg','Price vs 50d MA','Insider buying','Analyst +25% upside','% vs Peers'];
+const SIG_LABELS = ['EPS & Rev beat','PE vs hist avg','Price vs 50d MA','Insider buying','Analyst +25% upside','PE vs peers'];
  
 const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA,F,GM'.split(','));
  
@@ -334,20 +333,16 @@ export default function Home() {
  
   const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
   const timerRef=useRef(null), tickersRef=useRef([]);
- 
   const goToPage = useCallback((nextPage, dir = 1) => {
     if (transitioning || nextPage === carouselPage) return;
-    nextPageRef.current = nextPage;
     setCarouselDir(dir);
     setTransitioning(true);
     setAnimPhase('exit');
-    // After exit (120ms), swap page and start enter
     setTimeout(() => {
       setCarouselPage(nextPage);
       setAnimPhase('enter');
-      // After enter (160ms), settle
-      setTimeout(() => { setAnimPhase('idle'); setTransitioning(false); }, 160);
-    }, 120);
+      setTimeout(() => { setAnimPhase('idle'); setTransitioning(false); }, 150);
+    }, 100);
   }, [transitioning, carouselPage]);
  
   const prevPage = useCallback(() => { if (carouselPage > 0) goToPage(carouselPage - 1, -1); }, [carouselPage, goToPage]);
@@ -535,26 +530,20 @@ export default function Home() {
               there is zero flash when switching pages.
             */}
             <div style={{ position:'relative' }}>
-              {/* Left arrow — 50px outside the card grid */}
-              <div style={{ position:'absolute', left:-50, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+              {/* Left arrow — 20px outside the card grid */}
+              <div style={{ position:'absolute', left:-20, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
                 <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
               </div>
  
-              {/* Cards — CSS opacity+translate transition, no key= remount */}
+              {/* Cards — pure opacity fade, no translate so cards never shimmy */}
               <div
                 style={{
                   display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16,
                   opacity:    animPhase === 'exit' ? 0 : 1,
-                  transform:  animPhase === 'exit'
-                    ? `translateX(${carouselDir > 0 ? '-18px' : '18px'})`
-                    : animPhase === 'enter'
-                      ? `translateX(${carouselDir > 0 ? '14px' : '-14px'})`
-                      : 'translateX(0)',
-                  transition: animPhase === 'idle'
-                    ? 'opacity 0.15s ease, transform 0.15s ease'
-                    : animPhase === 'enter'
-                      ? 'opacity 0.16s ease, transform 0.18s ease'
-                      : 'opacity 0.12s ease, transform 0.12s ease',
+                  transition: animPhase === 'exit'
+                    ? 'opacity 0.1s ease'
+                    : 'opacity 0.15s ease',
+                  willChange: 'opacity',
                 }}
               >
                 {currentCards.map((stock, i) => {
@@ -570,8 +559,8 @@ export default function Home() {
                 })}
               </div>
  
-              {/* Right arrow — 50px outside the card grid */}
-              <div style={{ position:'absolute', right:-50, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+              {/* Right arrow — 20px outside the card grid */}
+              <div style={{ position:'absolute', right:-20, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
                 <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
               </div>
             </div>
