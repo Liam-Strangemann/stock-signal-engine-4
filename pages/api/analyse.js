@@ -449,25 +449,40 @@ async function resolveInsider(ticker) {
   return { buys: [], sells: [], source: null };
 }
 function buildInsider(buys, sells, source) {
-  if (buys.length>0) {
-    const sh=buys.reduce((s,t)=>s+(t.share||0),0),val=buys.reduce((s,t)=>s+(t.value||Math.abs((t.share||0)*(t.transactionPrice||0))),0);
-    const parts=[`${buys.length} buy${buys.length>1?'s':''}`];
-    const s=fmtSh(sh);if(s)parts.push(s);
-    const d=fmt$M(val);if(d)parts.push(d);
-    const dates=buys.map(t=>t.transactionDate).filter(Boolean).sort().reverse();
-    const rc=dates[0]?timeAgo(dates[0]):null;if(rc)parts.push(rc);
-    return{status:'pass',value:parts.join(' · ')};
+  if (buys.length > 0) {
+    const sh = buys.reduce((s, t) => s + (t.share || 0), 0);
+    // Use t.value when present (it is already total dollars for that transaction).
+    // Fall back to shares × price ONLY when value is absent AND price < $10,000
+    // (i.e. it looks like a per-share price, not a total).
+    const val = buys.reduce((s, t) => {
+      if (t.value && t.value > 0) return s + t.value;
+      const px = t.transactionPrice || 0;
+      if (px > 0 && px < 10000 && (t.share || 0) > 0) return s + px * t.share;
+      return s;
+    }, 0);
+    const parts = [`${buys.length} buy${buys.length > 1 ? 's' : ''}`];
+    const sv = fmtSh(sh);  if (sv) parts.push(sv);
+    const dv = fmt$M(val); if (dv) parts.push(dv);
+    const dates = buys.map(t => t.transactionDate).filter(Boolean).sort().reverse();
+    const rc = dates[0] ? timeAgo(dates[0]) : null; if (rc) parts.push(rc);
+    return { status: 'pass', value: parts.join(' · ') };
   }
-  if (sells.length>0) {
-    const sh=sells.reduce((s,t)=>s+(t.share||0),0),val=sells.reduce((s,t)=>s+(t.value||Math.abs((t.share||0)*(t.transactionPrice||0))),0);
-    const parts=[`${sells.length} sell${sells.length>1?'s':''}, no buys`];
-    const s=fmtSh(sh);if(s)parts.push(s);
-    const d=fmt$M(val);if(d)parts.push(d);
-    const dates=sells.map(t=>t.transactionDate).filter(Boolean).sort().reverse();
-    const rc=dates[0]?timeAgo(dates[0]):null;if(rc)parts.push(rc);
-    return{status:'fail',value:parts.join(' · ')};
+  if (sells.length > 0) {
+    const sh = sells.reduce((s, t) => s + (t.share || 0), 0);
+    const val = sells.reduce((s, t) => {
+      if (t.value && t.value > 0) return s + t.value;
+      const px = t.transactionPrice || 0;
+      if (px > 0 && px < 10000 && (t.share || 0) > 0) return s + px * t.share;
+      return s;
+    }, 0);
+    const parts = [`${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys`];
+    const sv = fmtSh(sh);  if (sv) parts.push(sv);
+    const dv = fmt$M(val); if (dv) parts.push(dv);
+    const dates = sells.map(t => t.transactionDate).filter(Boolean).sort().reverse();
+    const rc = dates[0] ? timeAgo(dates[0]) : null; if (rc) parts.push(rc);
+    return { status: 'fail', value: parts.join(' · ') };
   }
-  return{status:'neutral',value:source?'No activity (30d)':'No data'};
+  return { status: 'neutral', value: source ? 'No activity (30d)' : 'No data' };
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
