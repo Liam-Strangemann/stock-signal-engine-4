@@ -334,22 +334,79 @@ function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Insider transactions — Nasdaq JSON API only
+// Insider transactions
 //
-// Uses the same data powering nasdaq.com/market-activity/stocks/{ticker}/insider-activity
-// Endpoint returns individual filed transactions with exact share counts and values.
-// We keep only open-market Purchase (P) and Sale (S) within the last 30 days,
-// and cap individual transaction value at $500M to guard against bad data.
+// Source priority (server-side reliability):
+//   1. Finnhub  — authenticated API, always works server-side
+//   2. OpenInsider — public HTML scraper, reliable fallback
+//   3. Nasdaq API — last resort (sometimes blocks server IPs)
+//
+// All sources: 30-day window, dedup by date+shares+type, $500M per-tx cap,
+// open-market Purchase (P) and Sale (S) only.
 // ─────────────────────────────────────────────────────────────────────────────
  
-const MAX_TX_VALUE = 500e6; // $500M cap per transaction — filters data errors
+const MAX_TX_VALUE = 500e6;
  
 async function resolveInsider(ticker) {
-  const cut30 = new Date(Date.now() - 30 * 86400000);
-  const buys=[], sells=[];
+  const now   = Math.floor(Date.now() / 1000);
+  const ago30 = now - 30 * 86400;
+  const from  = new Date(ago30 * 1000).toISOString().slice(0, 10);
+  const to    = new Date(now   * 1000).toISOString().slice(0, 10);
+  const cut30 = new Date(ago30 * 1000);
  
+  // ── 1. Finnhub ─────────────────────────────────────────────────────────────
   try {
-    // Nasdaq public JSON API — same data as the insider-activity page
+    const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
+    const txns = (d?.data || []).filter(t => {
+      const dt = new Date(t.transactionDate);
+      return !isNaN(dt) && dt >= cut30;
+    });
+    const seen = new Set();
+    const unique = txns.filter(t => {
+      const key = `${t.name}|${t.transactionDate}|${t.share}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const buys  = unique.filter(t => t.transactionCode === 'P' && (t.value || 0) <= MAX_TX_VALUE);
+    const sells = unique.filter(t => t.transactionCode === 'S' && (t.value || 0) <= MAX_TX_VALUE);
+    if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'finnhub' };
+  } catch (_) {}
+ 
+  // ── 2. OpenInsider ─────────────────────────────────────────────────────────
+  try {
+    const r = await fetch(
+      `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
+      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) }
+    );
+    if (r.ok) {
+      const html = await r.text();
+      const rows = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
+      const buys = [], sells = [], seen = new Set();
+      for (const row of rows) {
+        const cells = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
+        if (cells.length < 10) continue;
+        const [, dateStr, , , type, , , , sharesRaw, valueRaw] = cells;
+        if (!dateStr || !type) continue;
+        const txDate = new Date(dateStr);
+        if (isNaN(txDate) || txDate < cut30) continue;
+        const shares = parseInt((sharesRaw || '').replace(/[^0-9]/g, '')) || 0;
+        const value  = parseInt((valueRaw  || '').replace(/[^0-9]/g, '')) || 0;
+        if (value > MAX_TX_VALUE) continue;
+        const key = `${dateStr}|${shares}|${type}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const entry = { transactionDate: dateStr, share: shares, value, transactionPrice: shares > 0 ? value / shares : 0 };
+        if (/P\s*-\s*Purchase/i.test(type)) buys.push(entry);
+        else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
+      }
+      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'openinsider' };
+    }
+  } catch (_) {}
+ 
+  // ── 3. Nasdaq JSON API (last resort — may be blocked from Vercel IPs) ──────
+  try {
     const url = `https://api.nasdaq.com/api/company/${ticker.toLowerCase()}/insider-trades?limit=40&type=ALL&sortColumn=lastDate&sortOrder=DESC`;
     const r = await fetch(url, {
       headers: {
@@ -360,59 +417,37 @@ async function resolveInsider(ticker) {
       },
       signal: AbortSignal.timeout(10000),
     });
- 
     if (r.ok) {
       const json = await r.json();
-      // Response shape: { data: { insiderTrades: { rows: [...] } } }
-      const rows =
-        json?.data?.insiderTrades?.rows ||
-        json?.data?.rows ||
-        json?.rows || [];
- 
-      const seen = new Set();
+      const rows = json?.data?.insiderTrades?.rows || json?.data?.rows || json?.rows || [];
+      const buys = [], sells = [], seen = new Set();
       for (const row of rows) {
-        // Fields: lastDate, transactionType, shares, value, insiderTitle, insiderName
-        const dateStr  = row?.lastDate || row?.date || row?.transactionDate;
-        const typeRaw  = (row?.transactionType || row?.type || '').trim();
+        const dateStr   = row?.lastDate || row?.date || row?.transactionDate;
+        const typeRaw   = (row?.transactionType || row?.type || '').trim();
         const sharesRaw = String(row?.shares || row?.sharesTraded || '0');
         const valueRaw  = String(row?.value  || row?.transactionValue || '0');
- 
         if (!dateStr) continue;
         const txDate = new Date(dateStr);
         if (isNaN(txDate) || txDate < cut30) continue;
- 
-        // Only open-market buys (P) and sales (S) — skip options exercises, gifts, etc.
         const isPurchase = /^P$/i.test(typeRaw) || /purchase/i.test(typeRaw);
         const isSale     = /^S$/i.test(typeRaw) || /sale/i.test(typeRaw);
         if (!isPurchase && !isSale) continue;
- 
         const shares = parseInt(sharesRaw.replace(/[^0-9]/g, '')) || 0;
         const value  = parseInt(valueRaw.replace(/[^0-9]/g, ''))  || 0;
- 
-        // Skip transactions with implausibly large values (data errors)
         if (value > MAX_TX_VALUE) continue;
- 
         const key = `${dateStr}|${shares}|${typeRaw}`;
         if (seen.has(key)) continue;
         seen.add(key);
- 
-        const entry = {
-          transactionDate:  dateStr,
-          share:            shares,
-          value:            value,
-          transactionPrice: shares > 0 && value > 0 ? value / shares : 0,
-        };
- 
+        const entry = { transactionDate: dateStr, share: shares, value, transactionPrice: shares > 0 && value > 0 ? value / shares : 0 };
         if (isPurchase) buys.push(entry);
         else            sells.push(entry);
       }
+      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'nasdaq' };
     }
-  } catch(_) {}
+  } catch (_) {}
  
-  return { buys, sells, source: buys.length || sells.length ? 'nasdaq' : null };
+  return { buys: [], sells: [], source: null };
 }
- 
- 
 function buildInsider(buys, sells, source) {
   if (buys.length>0) {
     const sh=buys.reduce((s,t)=>s+(t.share||0),0),val=buys.reduce((s,t)=>s+(t.value||Math.abs((t.share||0)*(t.transactionPrice||0))),0);
@@ -537,12 +572,9 @@ async function resolvePeerPE(ticker, curPE, targetMC, crumbInfo) {
     peerList=peerList.slice(0,10);
     if (!peerList.length) return null;
  
-    const all=[];
-    for (let i=0;i<peerList.length;i+=2) {
-      const batch=peerList.slice(i,i+2);
-      const res=await Promise.allSettled(batch.map(p=>getPeerPE(p,crumbInfo)));
-      all.push(...res.filter(r=>r.status==='fulfilled'&&r.value).map(r=>r.value));
-    }
+    // Fetch all peers in parallel — no more 2-at-a-time batching
+    const res = await Promise.allSettled(peerList.map(p => getPeerPE(p, crumbInfo)));
+    const all = res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
     if (!all.length) return null;
  
     // Market-cap tier filter
