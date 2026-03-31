@@ -33,6 +33,10 @@ const FONTS="'Cormorant Garamond','Georgia',serif";
 const SANS ="'DM Sans','Helvetica Neue',sans-serif";
 const MONO ="'DM Mono','Courier New',monospace";
  
+const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
+const PAGE_SIZE = 3; // cards visible at once
+const TOTAL_PICKS = 9;
+ 
 function scoreColor(sc, dark=false) {
   if (sc >= 5) return C.gold;
   if (sc >= 4) return dark ? '#A8C080' : C.green;
@@ -68,15 +72,10 @@ function ScoreDots({ score, max=6, dark=false }) {
   );
 }
  
-// ── SigPill ───────────────────────────────────────────────────────────────────
-// Pill colours are identical to the original for pass/fail/neutral.
-// When value is missing/no-data the pill gets a dashed border and is clickable.
-// While retrying a spinner appears. Text shows "no data, tap to retry".
 function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }) {
   const noData = loading || !sig.value || sig.value === '--' || sig.value === 'No data';
   const p = sig.status === 'pass', f = sig.status === 'fail';
  
-  // ── Original colours (unchanged) ──
   const bg  = dark ? p?C.dkGreenBg : f?C.dkRedBg  : C.dkAmberBg
                    : p?C.greenBg   : f?C.redBg     : C.amberBg;
   const col = dark ? p?C.dkGreen   : f?C.dkRed     : C.dkAmber
@@ -86,13 +85,10 @@ function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }
  
   const isClickable = noData && !loading && onRetry;
  
-  // No-data state uses same amber background as neutral, but dashed border
   const pillBg  = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
-    ? (dark ? C.dkAmberBg : C.amberBg)
-    : bg;
+    ? (dark ? C.dkAmberBg : C.amberBg) : bg;
   const pillCol = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
-    ? (dark ? C.dkAmber : C.amber)
-    : col;
+    ? (dark ? C.dkAmber : C.amber) : col;
   const pillBd  = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
     ? `0.5px dashed ${dark ? C.dkAmberBd : C.amberBd}`
     : `0.5px solid ${bd}`;
@@ -102,12 +98,9 @@ function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }
       onClick={isClickable ? () => onRetry(signalIndex) : undefined}
       title={isClickable ? `Click to retry ${label}` : undefined}
       style={{
-        background:   pillBg,
-        border:       pillBd,
-        borderRadius: 5,
-        padding:      '5px 7px',
-        cursor:       isClickable ? 'pointer' : 'default',
-        transition:   'opacity 0.15s',
+        background: pillBg, border: pillBd, borderRadius: 5,
+        padding: '5px 7px', cursor: isClickable ? 'pointer' : 'default',
+        transition: 'opacity 0.15s',
       }}
     >
       <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:3 }}>
@@ -118,8 +111,7 @@ function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }
         <div style={{ fontSize:7.5, color:dark?'rgba(154,152,144,0.75)':C.txLight, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em', lineHeight:1 }}>{label}</div>
       </div>
       <div style={{ fontSize:10, fontWeight:500, color:pillCol, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>
-        {loading
-          ? 'fetching…'
+        {loading ? 'fetching…'
           : (!sig.value || sig.value === '--' || sig.value === 'No data')
             ? 'no data, tap to retry'
             : sig.value}
@@ -128,7 +120,6 @@ function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }
   );
 }
  
-// ── Skeleton ──────────────────────────────────────────────────────────────────
 function SkeletonCard() {
   const b = (w,h,x={}) => <div style={{ width:w, height:h, borderRadius:2, background:'rgba(255,255,255,0.06)', animation:'shimmer 1.8s ease-in-out infinite', ...x }}/>;
   return (
@@ -146,13 +137,11 @@ function SkeletonCard() {
   );
 }
  
-// ── FeatureCard ───────────────────────────────────────────────────────────────
 function FeatureCard({ stock, rank, onSignalRetry }) {
   if (!stock) return <SkeletonCard/>;
   const sc     = Math.min(stock.score || 0, 6);
   const rating = getRating(sc);
   const chgPos = stock.change?.startsWith('+');
-  const medals = ['I','II','III'];
   const sc_col = scoreColor(sc, true);
   const exchange = stock.exchange || (US_SET.has(stock.ticker) ? 'NYSE' : 'INTL');
  
@@ -161,7 +150,7 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16 }}>
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:6 }}>
-            Rank {medals[rank-1]}
+            Rank {RANK_LABELS[rank-1]}
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5, flexWrap:'wrap' }}>
             <span style={{ fontSize:26, fontWeight:700, fontFamily:FONTS, color:'#F1EFE8', letterSpacing:'0.02em' }}>{stock.ticker}</span>
@@ -192,13 +181,8 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
         {SIG_LABELS.map((label,i) => {
           const sig = (stock.signals||[])[i]||{};
           return (
-            <SigPill
-              key={i}
-              sig={{ status:sig.status, value:sig.value }}
-              label={label}
-              dark
-              signalIndex={i}
-              loading={sig._loading || false}
+            <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label} dark
+              signalIndex={i} loading={sig._loading || false}
               onRetry={onSignalRetry ? (idx) => onSignalRetry(stock.ticker, idx) : undefined}
             />
           );
@@ -210,6 +194,59 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
       <div style={{ position:'absolute', top:14, right:18, fontSize:9, color:'rgba(154,152,144,0.5)', fontFamily:MONO }}>
         {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
       </div>
+    </div>
+  );
+}
+ 
+// ── Carousel Arrow Button ─────────────────────────────────────────────────────
+function ArrowBtn({ dir, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={dir === 'left' ? 'Previous picks' : 'Next picks'}
+      style={{
+        width: 44, height: 44,
+        borderRadius: '50%',
+        background: disabled ? 'rgba(58,56,50,0.4)' : C.deepBg,
+        border: `1px solid ${disabled ? 'rgba(184,160,112,0.15)' : C.gold}`,
+        color: disabled ? 'rgba(184,160,112,0.25)' : C.gold,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        transition: 'all 0.2s',
+        flexShrink: 0,
+        padding: 0,
+      }}
+    >
+      {dir === 'left'
+        ? <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>
+        : <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>
+      }
+    </button>
+  );
+}
+ 
+// ── Page indicator dots ────────────────────────────────────────────────────────
+function PageDots({ total, active, onChange }) {
+  return (
+    <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+      {Array.from({ length: total }).map((_, i) => (
+        <button
+          key={i}
+          onClick={() => onChange(i)}
+          aria-label={`Page ${i+1}`}
+          style={{
+            width: i === active ? 20 : 6,
+            height: 6,
+            borderRadius: 3,
+            background: i === active ? C.gold : 'rgba(184,160,112,0.3)',
+            border: 'none',
+            padding: 0,
+            cursor: 'pointer',
+            transition: 'all 0.25s ease',
+          }}
+        />
+      ))}
     </div>
   );
 }
@@ -259,12 +296,8 @@ function ResultCard({ stock, rank, onSignalRetry }) {
         {SIG_LABELS.map((label,i) => {
           const sig = (stock.signals||[])[i]||{};
           return (
-            <SigPill
-              key={i}
-              sig={{ status:sig.status, value:sig.value }}
-              label={label}
-              signalIndex={i}
-              loading={sig._loading || false}
+            <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label}
+              signalIndex={i} loading={sig._loading || false}
               onRetry={onSignalRetry ? (idx) => onSignalRetry(stock.ticker, idx) : undefined}
             />
           );
@@ -292,10 +325,48 @@ export default function Home() {
   const [filter,setFilter]             = useState('all');
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
-  const [topPicks,setTopPicks]         = useState([null,null,null]);
+ 
+  // Top picks state — now holds 9
+  const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
   const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
+  const [carouselPage,setCarouselPage] = useState(0);   // 0 = ranks 1–3, 1 = ranks 4–6, 2 = ranks 7–9
+  const [carouselDir,setCarouselDir]   = useState(1);   // 1 = forward, -1 = backward (for animation)
+  const [isAnimating,setIsAnimating]   = useState(false);
+ 
+  const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE); // 3
   const timerRef=useRef(null), tickersRef=useRef([]);
  
+  // ── Carousel navigation ───────────────────────────────────────────────────
+  const goToPage = useCallback((nextPage, dir = 1) => {
+    if (isAnimating) return;
+    setCarouselDir(dir);
+    setIsAnimating(true);
+    setTimeout(() => {
+      setCarouselPage(nextPage);
+      setIsAnimating(false);
+    }, 260);
+  }, [isAnimating]);
+ 
+  const prevPage = useCallback(() => {
+    if (carouselPage > 0) goToPage(carouselPage - 1, -1);
+  }, [carouselPage, goToPage]);
+ 
+  const nextPage = useCallback(() => {
+    if (carouselPage < totalPages - 1) goToPage(carouselPage + 1, 1);
+  }, [carouselPage, totalPages, goToPage]);
+ 
+  // Keyboard arrow support
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.key === 'ArrowRight') nextPage();
+      if (e.key === 'ArrowLeft')  prevPage();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [nextPage, prevPage]);
+ 
+  // ── Fetch top 9 on mount ─────────────────────────────────────────────────
   useEffect(() => {
     let live = true;
     (async () => {
@@ -305,7 +376,10 @@ export default function Home() {
         const { candidates, totalScanned, stockMeta = {} } = await sr.json();
         if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
         setTopStatus(`Analysing top ${candidates.length} picks…`);
-        const ar = await fetch('/api/analyse', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers:candidates}) });
+        const ar = await fetch('/api/analyse', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ tickers: candidates }),
+        });
         if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
         const { results:res } = await ar.json();
         if (!live) return;
@@ -318,8 +392,14 @@ export default function Home() {
             return [ticker, { ...stock, exchange }];
           })
         );
-        const sorted = Object.values(merged).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0));
-        setTopPicks([sorted[0]||null, sorted[1]||null, sorted[2]||null]);
+        const sorted = Object.values(merged)
+          .filter(s => s && !s.error && s.score != null)
+          .sort((a, b) => (b.score||0) - (a.score||0))
+          .slice(0, TOTAL_PICKS);
+ 
+        // Fill up to TOTAL_PICKS with nulls if fewer results
+        const picks = Array(TOTAL_PICKS).fill(null).map((_, i) => sorted[i] || null);
+        setTopPicks(picks);
         setTopStatus(`${totalScanned||candidates.length} securities screened`);
       } catch(_) { if(live) setTopStatus('Could not load top picks'); }
     })();
@@ -327,35 +407,25 @@ export default function Home() {
   }, []);
  
   // ── Per-signal retry ──────────────────────────────────────────────────────
-  // Re-uses /api/analyse for a single ticker — guaranteed to use identical
-  // fetcher logic. Splices just the one updated signal back into state.
   const retrySignal = useCallback(async (ticker, signalIndex, isTopPick) => {
     const setState = isTopPick ? setTopPicks : setResults;
- 
-    // Mark that pill as loading
     setState(prev => prev.map(stock => {
       if (!stock || stock.ticker !== ticker) return stock;
       const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
       signals[signalIndex] = { ...(signals[signalIndex] || {}), _loading: true };
       return { ...stock, signals };
     }));
- 
     try {
       const res  = await fetch('/api/analyse', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ tickers: [ticker] }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: [ticker] }),
       });
-      const data    = await res.json();
-      const fresh   = data?.results?.[ticker];
-      let   newSig  = fresh?.signals?.[signalIndex] || { status:'neutral', value:'No data' };
- 
-      // Signal 3 = insider buying. If the API genuinely found nothing after
-      // retrying, settle on a readable message so the pill stops being retryable.
+      const data   = await res.json();
+      const fresh  = data?.results?.[ticker];
+      let newSig   = fresh?.signals?.[signalIndex] || { status:'neutral', value:'No data' };
       if (signalIndex === 3 && (!newSig.value || newSig.value === 'No data' || newSig.value === 'No activity (30d)')) {
         newSig = { status:'neutral', value:'No recent insider transactions' };
       }
- 
       setState(prev => prev.map(stock => {
         if (!stock || stock.ticker !== ticker) return stock;
         const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
@@ -364,7 +434,6 @@ export default function Home() {
         return { ...stock, signals, score };
       }));
     } catch (_) {
-      // Clear loading without changing value so pill stays retryable
       setState(prev => prev.map(stock => {
         if (!stock || stock.ticker !== ticker) return stock;
         const signals = [...(stock.signals || [])];
@@ -407,6 +476,11 @@ export default function Home() {
     return true;
   });
  
+  // Current page's 3 cards
+  const pageStart = carouselPage * PAGE_SIZE;
+  const currentCards = topPicks.slice(pageStart, pageStart + PAGE_SIZE);
+  while (currentCards.length < PAGE_SIZE) currentCards.push(null);
+ 
   return (
     <>
       <Head>
@@ -421,12 +495,18 @@ export default function Home() {
           ::selection{background:${C.gold};color:#2C2C2A;}
           input::placeholder{color:${C.txLight};}
           input:focus{outline:none;}
-          button{cursor:pointer;transition:opacity 0.14s;}
+          button{cursor:pointer;transition:opacity 0.14s,all 0.2s;}
           button:not(:disabled):hover{opacity:0.76;}
           button:disabled{opacity:0.38;cursor:not-allowed;}
           @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
           @keyframes shimmer{0%,100%{opacity:0.5}50%{opacity:0.85}}
           @keyframes spin{to{transform:rotate(360deg)}}
+          @keyframes slideInRight{from{opacity:0;transform:translateX(32px)}to{opacity:1;transform:translateX(0)}}
+          @keyframes slideInLeft{from{opacity:0;transform:translateX(-32px)}to{opacity:1;transform:translateX(0)}}
+          @keyframes slideOutRight{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(32px)}}
+          @keyframes slideOutLeft{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(-32px)}}
+          .carousel-enter-right { animation: slideInRight 0.26s ease both; }
+          .carousel-enter-left  { animation: slideInLeft  0.26s ease both; }
         `}</style>
       </Head>
  
@@ -458,13 +538,47 @@ export default function Home() {
  
           {/* ── Top Picks ── */}
           <div style={{ marginBottom:40 }}>
+            {/* Section header */}
             <div style={{ display:'flex', alignItems:'baseline', gap:16, marginBottom:20 }}>
               <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>Top Picks Today</h2>
               <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
               <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
             </div>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}>
-              {[0,1,2].map(i => <FeatureCard key={i} stock={topPicks[i]} rank={i+1} onSignalRetry={retryTopSignal}/>)}
+ 
+            {/* Carousel row: arrow | cards | arrow */}
+            <div style={{ display:'flex', alignItems:'center', gap:14 }}>
+              {/* Left arrow */}
+              <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
+ 
+              {/* Cards */}
+              <div
+                key={carouselPage}
+                className={`carousel-enter-${carouselDir > 0 ? 'right' : 'left'}`}
+                style={{ flex:1, display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}
+              >
+                {currentCards.map((stock, i) => {
+                  const globalRank = pageStart + i + 1;
+                  return (
+                    <FeatureCard
+                      key={stock ? stock.ticker : `skeleton-${globalRank}`}
+                      stock={stock}
+                      rank={globalRank}
+                      onSignalRetry={retryTopSignal}
+                    />
+                  );
+                })}
+              </div>
+ 
+              {/* Right arrow */}
+              <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
+            </div>
+ 
+            {/* Page indicator + range label */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:16, marginTop:18 }}>
+              <PageDots total={totalPages} active={carouselPage} onChange={(p) => goToPage(p, p > carouselPage ? 1 : -1)} />
+              <span style={{ fontSize:9, color:C.txLight, fontFamily:MONO, letterSpacing:'0.1em' }}>
+                {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, TOTAL_PICKS)} of {TOTAL_PICKS}
+              </span>
             </div>
           </div>
  
@@ -541,3 +655,4 @@ export default function Home() {
     </>
   );
 }
+ 
