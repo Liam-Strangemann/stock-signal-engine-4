@@ -327,17 +327,28 @@ export default function Home() {
   const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
   const [carouselPage,setCarouselPage] = useState(0);
   const [carouselDir,setCarouselDir]   = useState(1);
-  const [isAnimating,setIsAnimating]   = useState(false);
+  const [transitioning,setTransitioning] = useState(false);
+  // animPhase: 'idle' | 'exit' | 'enter'
+  const [animPhase,setAnimPhase]         = useState('idle');
+  const nextPageRef = useRef(0);
  
   const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
   const timerRef=useRef(null), tickersRef=useRef([]);
  
   const goToPage = useCallback((nextPage, dir = 1) => {
-    if (isAnimating) return;
+    if (transitioning || nextPage === carouselPage) return;
+    nextPageRef.current = nextPage;
     setCarouselDir(dir);
-    setIsAnimating(true);
-    setTimeout(() => { setCarouselPage(nextPage); setIsAnimating(false); }, 260);
-  }, [isAnimating]);
+    setTransitioning(true);
+    setAnimPhase('exit');
+    // After exit (120ms), swap page and start enter
+    setTimeout(() => {
+      setCarouselPage(nextPage);
+      setAnimPhase('enter');
+      // After enter (160ms), settle
+      setTimeout(() => { setAnimPhase('idle'); setTransitioning(false); }, 160);
+    }, 120);
+  }, [transitioning, carouselPage]);
  
   const prevPage = useCallback(() => { if (carouselPage > 0) goToPage(carouselPage - 1, -1); }, [carouselPage, goToPage]);
   const nextPage = useCallback(() => { if (carouselPage < totalPages - 1) goToPage(carouselPage + 1, 1); }, [carouselPage, totalPages, goToPage]);
@@ -481,10 +492,6 @@ export default function Home() {
           @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
           @keyframes shimmer{0%,100%{opacity:0.5}50%{opacity:0.85}}
           @keyframes spin{to{transform:rotate(360deg)}}
-          @keyframes slideInRight{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:translateX(0)}}
-          @keyframes slideInLeft{from{opacity:0;transform:translateX(-28px)}to{opacity:1;transform:translateX(0)}}
-          .carousel-enter-right{animation:slideInRight 0.26s ease both;}
-          .carousel-enter-left{animation:slideInLeft 0.26s ease both;}
         `}</style>
       </Head>
  
@@ -523,21 +530,32 @@ export default function Home() {
             </div>
  
             {/*
-              Arrows are position:absolute, centred vertically on the card area,
-              and offset 58px outside the content edge — so cards stay exactly
-              the same width as the original 3-up layout with no arrows.
+              Arrows are position:absolute, centred vertically on the card area.
+              Cards use opacity + translateX CSS transitions — no key remount so
+              there is zero flash when switching pages.
             */}
             <div style={{ position:'relative' }}>
-              {/* Left arrow — sits 58px to the left of the card grid */}
-              <div style={{ position:'absolute', left:-58, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+              {/* Left arrow — 50px outside the card grid */}
+              <div style={{ position:'absolute', left:-50, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
                 <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
               </div>
  
-              {/* Cards — full width, identical to original layout */}
+              {/* Cards — CSS opacity+translate transition, no key= remount */}
               <div
-                key={carouselPage}
-                className={`carousel-enter-${carouselDir > 0 ? 'right' : 'left'}`}
-                style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}
+                style={{
+                  display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16,
+                  opacity:    animPhase === 'exit' ? 0 : 1,
+                  transform:  animPhase === 'exit'
+                    ? `translateX(${carouselDir > 0 ? '-18px' : '18px'})`
+                    : animPhase === 'enter'
+                      ? `translateX(${carouselDir > 0 ? '14px' : '-14px'})`
+                      : 'translateX(0)',
+                  transition: animPhase === 'idle'
+                    ? 'opacity 0.15s ease, transform 0.15s ease'
+                    : animPhase === 'enter'
+                      ? 'opacity 0.16s ease, transform 0.18s ease'
+                      : 'opacity 0.12s ease, transform 0.12s ease',
+                }}
               >
                 {currentCards.map((stock, i) => {
                   const globalRank = pageStart + i + 1;
@@ -552,8 +570,8 @@ export default function Home() {
                 })}
               </div>
  
-              {/* Right arrow — sits 58px to the right of the card grid */}
-              <div style={{ position:'absolute', right:-58, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+              {/* Right arrow — 50px outside the card grid */}
+              <div style={{ position:'absolute', right:-50, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
                 <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
               </div>
             </div>
