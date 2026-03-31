@@ -37,11 +37,18 @@ const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
 const PAGE_SIZE   = 3;
 const TOTAL_PICKS = 9;
  
-function scoreColor(sc, dark=false) {
-  if (sc >= 5) return C.gold;
-  if (sc >= 4) return dark ? '#A8C080' : C.green;
-  if (sc >= 3) return dark ? '#C8A870' : C.amber;
-  return dark ? 'rgba(154,152,144,0.55)' : C.txLight;
+// Score colours:
+//   0–2  → muted bronze/grey
+//   3    → warm amber (watch)
+//   4    → light sage green
+//   5    → medium green
+//   6    → gold (best)
+function scoreColor(sc, dark = false) {
+  if (sc === 6) return C.gold;
+  if (sc === 5) return dark ? '#7DB87A' : '#5A8F57';   // medium green
+  if (sc === 4) return dark ? '#9ECB8A' : '#72A860';   // light sage green
+  if (sc === 3) return dark ? '#C8A870' : C.amber;     // amber
+  return dark ? 'rgba(154,152,144,0.55)' : C.txLight;  // muted
 }
  
 function getRating(sc) {
@@ -51,23 +58,32 @@ function getRating(sc) {
   return               { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
-function ScoreDots({ score, max=6, dark=false }) {
-  const filled = score >= 5 ? C.gold
-               : score >= 4 ? (dark ? '#A8C080' : C.green)
-               : score >= 3 ? (dark ? '#C8A870' : C.amber)
-               : score >= 2 ? (dark ? 'rgba(184,160,112,0.6)' : 'rgba(172,132,49,0.5)')
-               :              (dark ? 'rgba(184,160,112,0.4)' : 'rgba(172,132,49,0.35)');
+function ScoreDots({ score, max = 6, dark = false }) {
+  // Each filled dot uses the colour for *that position*, not the overall score colour.
+  // Dots 1-3 fill amber/bronze; dot 4 = light green; dot 5 = medium green; dot 6 = gold.
+  const dotColor = (i) => {
+    const pos = i + 1; // 1-indexed
+    if (pos > score) return null; // unfilled
+    if (pos === 6) return C.gold;
+    if (pos === 5) return dark ? '#7DB87A' : '#5A8F57';
+    if (pos === 4) return dark ? '#9ECB8A' : '#72A860';
+    if (pos === 3) return dark ? '#C8A870' : C.amber;
+    return dark ? 'rgba(184,160,112,0.65)' : 'rgba(172,132,49,0.55)'; // pos 1-2
+  };
   const emptyRing = dark ? 'rgba(95,94,86,0.45)' : C.borderDk;
   return (
-    <div style={{ display:'flex', gap:4 }}>
-      {Array.from({ length: max }).map((_, i) => (
-        <div key={i} style={{
-          width:7, height:7, borderRadius:'50%',
-          background: i < score ? filled : 'transparent',
-          border: `1.5px solid ${i < score ? filled : emptyRing}`,
-          transition: 'all 0.3s',
-        }}/>
-      ))}
+    <div style={{ display: 'flex', gap: 4 }}>
+      {Array.from({ length: max }).map((_, i) => {
+        const col = dotColor(i);
+        return (
+          <div key={i} style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: col || 'transparent',
+            border: `1.5px solid ${col || emptyRing}`,
+            transition: 'all 0.3s',
+          }} />
+        );
+      })}
     </div>
   );
 }
@@ -206,10 +222,6 @@ function ArrowBtn({ dir, onClick, disabled }) {
       disabled={disabled}
       aria-label={dir === 'left' ? 'Previous picks' : 'Next picks'}
       style={{
-        position: 'absolute',
-        top: '50%',
-        transform: 'translateY(-50%)',
-        [dir === 'left' ? 'left' : 'right']: -56,   // outside the card grid
         width: 40, height: 40,
         borderRadius: '50%',
         background: disabled ? 'rgba(58,56,50,0.5)' : C.deepBg,
@@ -217,9 +229,9 @@ function ArrowBtn({ dir, onClick, disabled }) {
         color: disabled ? 'rgba(184,160,112,0.2)' : C.gold,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         cursor: disabled ? 'not-allowed' : 'pointer',
-        transition: 'all 0.2s',
+        transition: 'border-color 0.2s, color 0.2s, background 0.2s',
         padding: 0,
-        zIndex: 10,
+        flexShrink: 0,
       }}
     >
       {dir === 'left'
