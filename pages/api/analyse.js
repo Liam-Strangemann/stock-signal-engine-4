@@ -334,108 +334,84 @@ function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Insider transactions — Nasdaq primary, Finnhub + OpenInsider as fallbacks
+// Insider transactions — Nasdaq JSON API only
+//
+// Uses the same data powering nasdaq.com/market-activity/stocks/{ticker}/insider-activity
+// Endpoint returns individual filed transactions with exact share counts and values.
+// We keep only open-market Purchase (P) and Sale (S) within the last 30 days,
+// and cap individual transaction value at $500M to guard against bad data.
 // ─────────────────────────────────────────────────────────────────────────────
-async function fetchNasdaqInsider(ticker) {
+ 
+const MAX_TX_VALUE = 500e6; // $500M cap per transaction — filters data errors
+ 
+async function resolveInsider(ticker) {
+  const cut30 = new Date(Date.now() - 30 * 86400000);
+  const buys=[], sells=[];
+ 
   try {
-    const url  = `https://www.nasdaq.com/market-activity/stocks/${ticker.toLowerCase()}/insider-activity`;
-    const html = await getPage(url, 10000);
-    const cut30 = new Date(Date.now() - 30 * 86400000);
-    const buys=[], sells=[];
+    // Nasdaq public JSON API — same data as the insider-activity page
+    const url = `https://api.nasdaq.com/api/company/${ticker.toLowerCase()}/insider-trades?limit=40&type=ALL&sortColumn=lastDate&sortOrder=DESC`;
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://www.nasdaq.com',
+        'Referer': 'https://www.nasdaq.com/',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
  
-    // Try __NEXT_DATA__ JSON first
-    const nd = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (nd) {
-      try {
-        const data = JSON.parse(nd[1]);
-        const rows =
-          data?.props?.pageProps?.insiderActivity?.data?.insiderActivity?.rows ||
-          data?.props?.pageProps?.data?.insiderActivity?.rows ||
-          data?.props?.pageProps?.recentActivity?.rows || [];
-        for (const row of rows) {
-          const dateStr = row?.lastDate || row?.date || row?.transactionDate;
-          const type    = (row?.transactionType || row?.type || '').toLowerCase();
-          const shares  = parseInt((String(row?.shares||'0')).replace(/[^0-9]/g,'')) || 0;
-          const value   = parseInt((String(row?.value ||'0')).replace(/[^0-9]/g,'')) || 0;
-          if (!dateStr) continue;
-          const txDate = new Date(dateStr);
-          if (isNaN(txDate) || txDate < cut30) continue;
-          const entry = { transactionDate:dateStr, share:shares, value, transactionPrice:shares>0&&value>0?value/shares:0 };
-          if (type.includes('purchase')||type.includes('buy')||type==='p') buys.push(entry);
-          else if (type.includes('sale')||type.includes('sell')||type==='s') sells.push(entry);
-        }
-        if (buys.length>0||sells.length>0) return {buys,sells,source:'nasdaq'};
-      } catch(_){}
-    }
- 
-    // HTML table fallback — columns: Name | Relation | Date | Type | #Shares | Value
-    const tableRows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
-    for (const match of tableRows) {
-      const cells = [...match[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(c=>c[1].replace(/<[^>]+>/g,'').trim());
-      if (cells.length < 5) continue;
-      const dateStr=cells[2], typeRaw=(cells[3]||'').toLowerCase(), sharesRaw=cells[4]||'0', valueRaw=cells[5]||'0';
-      if (!dateStr||!/\d{4}/.test(dateStr)) continue;
-      const txDate=new Date(dateStr);
-      if (isNaN(txDate)||txDate<cut30) continue;
-      const shares=parseInt(sharesRaw.replace(/[^0-9]/g,''))||0;
-      const value =parseInt(valueRaw.replace(/[^0-9]/g,''))||0;
-      const entry ={transactionDate:dateStr,share:shares,value,transactionPrice:shares>0&&value>0?value/shares:0};
-      if (typeRaw.includes('purchase')||typeRaw==='p') buys.push(entry);
-      else if (typeRaw.includes('sale')||typeRaw==='s') sells.push(entry);
-    }
-    if (buys.length>0||sells.length>0) return {buys,sells,source:'nasdaq'};
-  } catch(_){}
-  return null;
-}
- 
-async function resolveInsider(ticker, curPx) {
-  const now   = Math.floor(Date.now()/1000);
-  const ago30 = now - 30 * 86400;
-  const from  = new Date(ago30*1000).toISOString().slice(0,10);
-  const to    = new Date(now*1000).toISOString().slice(0,10);
-  const cut30 = new Date(ago30*1000);
- 
-  // 1. Nasdaq — primary
-  const nasdaqResult = await fetchNasdaqInsider(ticker);
-  if (nasdaqResult) return nasdaqResult;
- 
-  // 2. Finnhub with dedup + strict 30d window
-  try {
-    const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
-    const txns = (d?.data||[]).filter(t=>{const dt=new Date(t.transactionDate);return !isNaN(dt)&&dt>=cut30;});
-    const seen=new Set();
-    const unique=txns.filter(t=>{const key=`${t.name}|${t.transactionDate}|${t.share}`;if(seen.has(key))return false;seen.add(key);return true;});
-    const buys=unique.filter(t=>t.transactionCode==='P'), sells=unique.filter(t=>t.transactionCode==='S');
-    if (buys.length>0||sells.length>0) return {buys,sells,source:'finnhub'};
-  } catch(_){}
- 
-  // 3. OpenInsider with dedup
-  try {
-    const r=await fetch(`https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,{headers:{'User-Agent':'Mozilla/5.0'},signal:AbortSignal.timeout(7000)});
     if (r.ok) {
-      const html=await r.text(), rows=[...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
-      const buys=[],sells=[],seen=new Set();
-      for (const row of rows) {
-        const cells=[...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(c=>c[1].replace(/<[^>]+>/g,'').trim());
-        if(cells.length<10)continue;
-        const[,dateStr,,,type,,,,sharesRaw,valueRaw]=cells;
-        if(!dateStr||!type)continue;
-        const txDate=new Date(dateStr);
-        if(isNaN(txDate)||txDate<cut30)continue;
-        const shares=parseInt((sharesRaw||'').replace(/[^0-9]/g,''))||0;
-        const value =parseInt((valueRaw ||'').replace(/[^0-9]/g,''))||0;
-        const key=`${dateStr}|${shares}|${type}`;
-        if(seen.has(key))continue; seen.add(key);
-        const entry={transactionDate:dateStr,share:shares,value,transactionPrice:shares>0?value/shares:curPx};
-        if(/P\s*-\s*Purchase/i.test(type))buys.push(entry);
-        else if(/S\s*-\s*Sale/i.test(type))sells.push(entry);
-      }
-      if(buys.length>0||sells.length>0)return{buys,sells,source:'openinsider'};
-    }
-  } catch(_){}
+      const json = await r.json();
+      // Response shape: { data: { insiderTrades: { rows: [...] } } }
+      const rows =
+        json?.data?.insiderTrades?.rows ||
+        json?.data?.rows ||
+        json?.rows || [];
  
-  return {buys:[],sells:[],source:null};
+      const seen = new Set();
+      for (const row of rows) {
+        // Fields: lastDate, transactionType, shares, value, insiderTitle, insiderName
+        const dateStr  = row?.lastDate || row?.date || row?.transactionDate;
+        const typeRaw  = (row?.transactionType || row?.type || '').trim();
+        const sharesRaw = String(row?.shares || row?.sharesTraded || '0');
+        const valueRaw  = String(row?.value  || row?.transactionValue || '0');
+ 
+        if (!dateStr) continue;
+        const txDate = new Date(dateStr);
+        if (isNaN(txDate) || txDate < cut30) continue;
+ 
+        // Only open-market buys (P) and sales (S) — skip options exercises, gifts, etc.
+        const isPurchase = /^P$/i.test(typeRaw) || /purchase/i.test(typeRaw);
+        const isSale     = /^S$/i.test(typeRaw) || /sale/i.test(typeRaw);
+        if (!isPurchase && !isSale) continue;
+ 
+        const shares = parseInt(sharesRaw.replace(/[^0-9]/g, '')) || 0;
+        const value  = parseInt(valueRaw.replace(/[^0-9]/g, ''))  || 0;
+ 
+        // Skip transactions with implausibly large values (data errors)
+        if (value > MAX_TX_VALUE) continue;
+ 
+        const key = `${dateStr}|${shares}|${typeRaw}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+ 
+        const entry = {
+          transactionDate:  dateStr,
+          share:            shares,
+          value:            value,
+          transactionPrice: shares > 0 && value > 0 ? value / shares : 0,
+        };
+ 
+        if (isPurchase) buys.push(entry);
+        else            sells.push(entry);
+      }
+    }
+  } catch(_) {}
+ 
+  return { buys, sells, source: buys.length || sells.length ? 'nasdaq' : null };
 }
+ 
  
 function buildInsider(buys, sells, source) {
   if (buys.length>0) {
@@ -649,7 +625,7 @@ async function fetchStockData(ticker, crumbInfo) {
     resolveMA50(ticker,avData,crumbInfo,yhChart),
     resolvePE(ticker,avData,fhM,crumbInfo,yhChart),
     resolveTarget(ticker,avData,crumbInfo),
-    resolveInsider(ticker,curPx),
+    resolveInsider(ticker),
   ]);
   const {hi52,lo52}=resolve52w(avData,fhM,yhMeta,yhClose);
   const peerPE=await resolvePeerPE(ticker,curPE,fhM.marketCapitalization||0,crumbInfo);
