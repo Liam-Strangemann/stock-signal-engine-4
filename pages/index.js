@@ -37,49 +37,51 @@ const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
 const PAGE_SIZE   = 3;
 const TOTAL_PICKS = 9;
  
-// Score colours:
-//   0–2  → muted bronze/grey
-//   3    → warm amber (watch)
-//   4    → light sage green
-//   5    → medium green
-//   6    → gold (best)
+// ─────────────────────────────────────────────────────────────────────────────
+// Score colour system — three distinct greens for 4/5/6
+//
+//   0–2  → muted grey/bronze
+//   3    → amber  (watch)
+//   4    → sage green  (lightest)
+//   5    → mid green
+//   6    → deep forest green (strongest signal)
+//
+// dark=true variants are used on the dark card background (top picks).
+// ─────────────────────────────────────────────────────────────────────────────
 function scoreColor(sc, dark = false) {
-  if (sc === 6) return C.gold;
-  if (sc === 5) return dark ? '#7DB87A' : '#5A8F57';   // medium green
-  if (sc === 4) return dark ? '#9ECB8A' : '#72A860';   // light sage green
-  if (sc === 3) return dark ? '#C8A870' : C.amber;     // amber
-  return dark ? 'rgba(154,152,144,0.55)' : C.txLight;  // muted
+  if (sc >= 6) return dark ? '#7EC87A' : '#2D6E2A';   // deep forest green
+  if (sc === 5) return dark ? '#9DD88A' : '#3D8A38';  // mid green
+  if (sc === 4) return dark ? '#B8E0A0' : '#5A9A50';  // sage / light green
+  if (sc === 3) return dark ? '#C8A870' : C.amber;    // amber
+  return dark ? 'rgba(154,152,144,0.55)' : C.txLight; // muted
 }
  
+// Rating badge — 4/5/6 are now all distinct greens
 function getRating(sc) {
-  if (sc >= 5) return { label:'Strong Buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
-  if (sc === 4) return { label:'Buy',        color:'#4A6741', bg:'#E8EEDF', border:'#B0C8A8' };
-  if (sc === 3) return { label:'Watch',      color:'#7A6030', bg:'#F0E8D0', border:'#C8A870' };
+  if (sc >= 6) return { label:'Strong Buy', color:'#14532d', bg:'#bbf7d0', border:'#6ee7a0' }; // deep green
+  if (sc === 5) return { label:'Strong Buy', color:'#166534', bg:'#dcfce7', border:'#86efac' }; // mid green
+  if (sc === 4) return { label:'Buy',        color:'#3A7A35', bg:'#E4F2DE', border:'#A8CCA0' }; // sage green
+  if (sc === 3) return { label:'Watch',      color:'#7A6030', bg:'#F0E8D0', border:'#C8A870' }; // amber
   return               { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
+// ─────────────────────────────────────────────────────────────────────────────
+// ScoreDots — every filled dot uses the SAME colour as the card's score colour.
+// No more per-position colour variation: all filled dots = scoreColor(score).
+// ─────────────────────────────────────────────────────────────────────────────
 function ScoreDots({ score, max = 6, dark = false }) {
-  // Each filled dot uses the colour for *that position*, not the overall score colour.
-  // Dots 1-3 fill amber/bronze; dot 4 = light green; dot 5 = medium green; dot 6 = gold.
-  const dotColor = (i) => {
-    const pos = i + 1; // 1-indexed
-    if (pos > score) return null; // unfilled
-    if (pos === 6) return C.gold;
-    if (pos === 5) return dark ? '#7DB87A' : '#5A8F57';
-    if (pos === 4) return dark ? '#9ECB8A' : '#72A860';
-    if (pos === 3) return dark ? '#C8A870' : C.amber;
-    return dark ? 'rgba(184,160,112,0.65)' : 'rgba(172,132,49,0.55)'; // pos 1-2
-  };
-  const emptyRing = dark ? 'rgba(95,94,86,0.45)' : C.borderDk;
+  const filledColor = scoreColor(score, dark);
+  const emptyRing   = dark ? 'rgba(95,94,86,0.45)' : C.borderDk;
+ 
   return (
     <div style={{ display: 'flex', gap: 4 }}>
       {Array.from({ length: max }).map((_, i) => {
-        const col = dotColor(i);
+        const filled = i < score;
         return (
           <div key={i} style={{
             width: 7, height: 7, borderRadius: '50%',
-            background: col || 'transparent',
-            border: `1.5px solid ${col || emptyRing}`,
+            background: filled ? filledColor : 'transparent',
+            border: `1.5px solid ${filled ? filledColor : emptyRing}`,
             transition: 'all 0.3s',
           }} />
         );
@@ -214,7 +216,7 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
   );
 }
  
-// ── Carousel Arrow — rendered OUTSIDE the grid, no space stolen from cards ───
+// ── Carousel Arrow ─────────────────────────────────────────────────────────────
 function ArrowBtn({ dir, onClick, disabled }) {
   return (
     <button
@@ -339,12 +341,12 @@ export default function Home() {
   const [carouselPage,setCarouselPage] = useState(0);
   const [carouselDir,setCarouselDir]   = useState(1);
   const [transitioning,setTransitioning] = useState(false);
-  // animPhase: 'idle' | 'exit' | 'enter'
   const [animPhase,setAnimPhase]         = useState('idle');
   const nextPageRef = useRef(0);
  
   const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
   const timerRef=useRef(null), tickersRef=useRef([]);
+ 
   const goToPage = useCallback((nextPage, dir = 1) => {
     if (transitioning || nextPage === carouselPage) return;
     setCarouselDir(dir);
@@ -536,18 +538,11 @@ export default function Home() {
               <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
             </div>
  
-            {/*
-              Arrows are position:absolute, centred vertically on the card area.
-              Cards use opacity + translateX CSS transitions — no key remount so
-              there is zero flash when switching pages.
-            */}
             <div style={{ position:'relative' }}>
-              {/* Left arrow — 20px outside the card grid */}
               <div style={{ position:'absolute', left:-20, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
                 <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
               </div>
  
-              {/* Cards — pure opacity fade, no translate so cards never shimmy */}
               <div
                 style={{
                   display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16,
@@ -571,13 +566,11 @@ export default function Home() {
                 })}
               </div>
  
-              {/* Right arrow — 20px outside the card grid */}
               <div style={{ position:'absolute', right:-20, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
                 <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
               </div>
             </div>
  
-            {/* Page dots + counter — tighter top margin */}
             <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:16, marginTop:14 }}>
               <PageDots total={totalPages} active={carouselPage} onChange={(p) => goToPage(p, p > carouselPage ? 1 : -1)} />
               <span style={{ fontSize:9, color:C.txLight, fontFamily:MONO, letterSpacing:'0.1em' }}>
