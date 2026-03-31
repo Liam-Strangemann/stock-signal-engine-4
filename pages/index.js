@@ -12,7 +12,8 @@ const PRESETS = {
   'Dividend':     'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
  
-const SIG_LABELS = ['EPS & Rev beat','PE vs hist avg','Price vs 50d MA','Insider buying','Analyst +25% upside','PE vs peers'];
+// Updated: S6 label now clearly says "% vs Peers" to reflect the new diff display
+const SIG_LABELS = ['EPS & Rev beat','PE vs hist avg','Price vs 50d MA','Insider buying','Analyst +25% upside','% vs Peers'];
  
 const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA,F,GM'.split(','));
  
@@ -34,7 +35,7 @@ const SANS ="'DM Sans','Helvetica Neue',sans-serif";
 const MONO ="'DM Mono','Courier New',monospace";
  
 const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
-const PAGE_SIZE = 3; // cards visible at once
+const PAGE_SIZE   = 3;
 const TOTAL_PICKS = 9;
  
 function scoreColor(sc, dark=false) {
@@ -198,7 +199,7 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
   );
 }
  
-// ── Carousel Arrow Button ─────────────────────────────────────────────────────
+// ── Carousel Arrow — rendered OUTSIDE the grid, no space stolen from cards ───
 function ArrowBtn({ dir, onClick, disabled }) {
   return (
     <button
@@ -206,16 +207,20 @@ function ArrowBtn({ dir, onClick, disabled }) {
       disabled={disabled}
       aria-label={dir === 'left' ? 'Previous picks' : 'Next picks'}
       style={{
-        width: 44, height: 44,
+        position: 'absolute',
+        top: '50%',
+        transform: 'translateY(-50%)',
+        [dir === 'left' ? 'left' : 'right']: -56,   // outside the card grid
+        width: 40, height: 40,
         borderRadius: '50%',
-        background: disabled ? 'rgba(58,56,50,0.4)' : C.deepBg,
+        background: disabled ? 'rgba(58,56,50,0.5)' : C.deepBg,
         border: `1px solid ${disabled ? 'rgba(184,160,112,0.15)' : C.gold}`,
-        color: disabled ? 'rgba(184,160,112,0.25)' : C.gold,
+        color: disabled ? 'rgba(184,160,112,0.2)' : C.gold,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         cursor: disabled ? 'not-allowed' : 'pointer',
         transition: 'all 0.2s',
-        flexShrink: 0,
         padding: 0,
+        zIndex: 10,
       }}
     >
       {dir === 'left'
@@ -226,7 +231,6 @@ function ArrowBtn({ dir, onClick, disabled }) {
   );
 }
  
-// ── Page indicator dots ────────────────────────────────────────────────────────
 function PageDots({ total, active, onChange }) {
   return (
     <div style={{ display:'flex', gap:6, alignItems:'center' }}>
@@ -236,13 +240,9 @@ function PageDots({ total, active, onChange }) {
           onClick={() => onChange(i)}
           aria-label={`Page ${i+1}`}
           style={{
-            width: i === active ? 20 : 6,
-            height: 6,
-            borderRadius: 3,
+            width: i === active ? 20 : 6, height: 6, borderRadius: 3,
             background: i === active ? C.gold : 'rgba(184,160,112,0.3)',
-            border: 'none',
-            padding: 0,
-            cursor: 'pointer',
+            border: 'none', padding: 0, cursor: 'pointer',
             transition: 'all 0.25s ease',
           }}
         />
@@ -251,7 +251,6 @@ function PageDots({ total, active, onChange }) {
   );
 }
  
-// ── ResultCard ────────────────────────────────────────────────────────────────
 function ResultCard({ stock, rank, onSignalRetry }) {
   const sc     = Math.min(stock.score||0, 6);
   const rating = getRating(sc);
@@ -316,7 +315,6 @@ function ResultCard({ stock, rank, onSignalRetry }) {
   );
 }
  
-// ── Main ──────────────────────────────────────────────────────────────────────
 export default function Home() {
   const [input,setInput]               = useState('');
   const [results,setResults]           = useState([]);
@@ -325,37 +323,25 @@ export default function Home() {
   const [filter,setFilter]             = useState('all');
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
- 
-  // Top picks state — now holds 9
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
   const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
-  const [carouselPage,setCarouselPage] = useState(0);   // 0 = ranks 1–3, 1 = ranks 4–6, 2 = ranks 7–9
-  const [carouselDir,setCarouselDir]   = useState(1);   // 1 = forward, -1 = backward (for animation)
+  const [carouselPage,setCarouselPage] = useState(0);
+  const [carouselDir,setCarouselDir]   = useState(1);
   const [isAnimating,setIsAnimating]   = useState(false);
  
-  const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE); // 3
+  const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
   const timerRef=useRef(null), tickersRef=useRef([]);
  
-  // ── Carousel navigation ───────────────────────────────────────────────────
   const goToPage = useCallback((nextPage, dir = 1) => {
     if (isAnimating) return;
     setCarouselDir(dir);
     setIsAnimating(true);
-    setTimeout(() => {
-      setCarouselPage(nextPage);
-      setIsAnimating(false);
-    }, 260);
+    setTimeout(() => { setCarouselPage(nextPage); setIsAnimating(false); }, 260);
   }, [isAnimating]);
  
-  const prevPage = useCallback(() => {
-    if (carouselPage > 0) goToPage(carouselPage - 1, -1);
-  }, [carouselPage, goToPage]);
+  const prevPage = useCallback(() => { if (carouselPage > 0) goToPage(carouselPage - 1, -1); }, [carouselPage, goToPage]);
+  const nextPage = useCallback(() => { if (carouselPage < totalPages - 1) goToPage(carouselPage + 1, 1); }, [carouselPage, totalPages, goToPage]);
  
-  const nextPage = useCallback(() => {
-    if (carouselPage < totalPages - 1) goToPage(carouselPage + 1, 1);
-  }, [carouselPage, totalPages, goToPage]);
- 
-  // Keyboard arrow support
   useEffect(() => {
     const handler = (e) => {
       if (e.target.tagName === 'INPUT') return;
@@ -366,7 +352,6 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handler);
   }, [nextPage, prevPage]);
  
-  // ── Fetch top 9 on mount ─────────────────────────────────────────────────
   useEffect(() => {
     let live = true;
     (async () => {
@@ -387,8 +372,7 @@ export default function Home() {
           Object.entries(res||{}).map(([ticker, stock]) => {
             if (!stock) return [ticker, stock];
             const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
-              ? stock.exchange
-              : (stockMeta[ticker]?.exchange || stock.exchange);
+              ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
             return [ticker, { ...stock, exchange }];
           })
         );
@@ -396,8 +380,6 @@ export default function Home() {
           .filter(s => s && !s.error && s.score != null)
           .sort((a, b) => (b.score||0) - (a.score||0))
           .slice(0, TOTAL_PICKS);
- 
-        // Fill up to TOTAL_PICKS with nulls if fewer results
         const picks = Array(TOTAL_PICKS).fill(null).map((_, i) => sorted[i] || null);
         setTopPicks(picks);
         setTopStatus(`${totalScanned||candidates.length} securities screened`);
@@ -406,7 +388,6 @@ export default function Home() {
     return () => { live = false; };
   }, []);
  
-  // ── Per-signal retry ──────────────────────────────────────────────────────
   const retrySignal = useCallback(async (ticker, signalIndex, isTopPick) => {
     const setState = isTopPick ? setTopPicks : setResults;
     setState(prev => prev.map(stock => {
@@ -476,9 +457,8 @@ export default function Home() {
     return true;
   });
  
-  // Current page's 3 cards
-  const pageStart = carouselPage * PAGE_SIZE;
-  const currentCards = topPicks.slice(pageStart, pageStart + PAGE_SIZE);
+  const pageStart    = carouselPage * PAGE_SIZE;
+  const currentCards = [...topPicks.slice(pageStart, pageStart + PAGE_SIZE)];
   while (currentCards.length < PAGE_SIZE) currentCards.push(null);
  
   return (
@@ -501,12 +481,10 @@ export default function Home() {
           @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
           @keyframes shimmer{0%,100%{opacity:0.5}50%{opacity:0.85}}
           @keyframes spin{to{transform:rotate(360deg)}}
-          @keyframes slideInRight{from{opacity:0;transform:translateX(32px)}to{opacity:1;transform:translateX(0)}}
-          @keyframes slideInLeft{from{opacity:0;transform:translateX(-32px)}to{opacity:1;transform:translateX(0)}}
-          @keyframes slideOutRight{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(32px)}}
-          @keyframes slideOutLeft{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(-32px)}}
-          .carousel-enter-right { animation: slideInRight 0.26s ease both; }
-          .carousel-enter-left  { animation: slideInLeft  0.26s ease both; }
+          @keyframes slideInRight{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:translateX(0)}}
+          @keyframes slideInLeft{from{opacity:0;transform:translateX(-28px)}to{opacity:1;transform:translateX(0)}}
+          .carousel-enter-right{animation:slideInRight 0.26s ease both;}
+          .carousel-enter-left{animation:slideInLeft 0.26s ease both;}
         `}</style>
       </Head>
  
@@ -537,24 +515,29 @@ export default function Home() {
         <div style={{ maxWidth:1200, margin:'0 auto', padding:'32px 32px 80px' }}>
  
           {/* ── Top Picks ── */}
-          <div style={{ marginBottom:40 }}>
-            {/* Section header */}
+          <div style={{ marginBottom:16 }}>
             <div style={{ display:'flex', alignItems:'baseline', gap:16, marginBottom:20 }}>
               <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>Top Picks Today</h2>
               <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
               <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
             </div>
  
-            {/* Carousel row: arrow | cards | arrow */}
-            <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-              {/* Left arrow */}
-              <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
+            {/*
+              Arrows are position:absolute, centred vertically on the card area,
+              and offset 58px outside the content edge — so cards stay exactly
+              the same width as the original 3-up layout with no arrows.
+            */}
+            <div style={{ position:'relative' }}>
+              {/* Left arrow — sits 58px to the left of the card grid */}
+              <div style={{ position:'absolute', left:-58, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+                <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
+              </div>
  
-              {/* Cards */}
+              {/* Cards — full width, identical to original layout */}
               <div
                 key={carouselPage}
                 className={`carousel-enter-${carouselDir > 0 ? 'right' : 'left'}`}
-                style={{ flex:1, display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}
+                style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}
               >
                 {currentCards.map((stock, i) => {
                   const globalRank = pageStart + i + 1;
@@ -569,12 +552,14 @@ export default function Home() {
                 })}
               </div>
  
-              {/* Right arrow */}
-              <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
+              {/* Right arrow — sits 58px to the right of the card grid */}
+              <div style={{ position:'absolute', right:-58, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+                <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
+              </div>
             </div>
  
-            {/* Page indicator + range label */}
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:16, marginTop:18 }}>
+            {/* Page dots + counter — tighter top margin */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:16, marginTop:14 }}>
               <PageDots total={totalPages} active={carouselPage} onChange={(p) => goToPage(p, p > carouselPage ? 1 : -1)} />
               <span style={{ fontSize:9, color:C.txLight, fontFamily:MONO, letterSpacing:'0.1em' }}>
                 {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, TOTAL_PICKS)} of {TOTAL_PICKS}
@@ -583,7 +568,7 @@ export default function Home() {
           </div>
  
           {/* ── Custom Scan ── */}
-          <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:32 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:20 }}>
             <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em', whiteSpace:'nowrap' }}>Custom Scan</h2>
             <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
           </div>
@@ -639,7 +624,7 @@ export default function Home() {
             <div style={{ display:'flex', gap:8, marginTop:24, paddingTop:20, borderTop:`0.5px solid ${C.borderDk}`, flexWrap:'wrap', alignItems:'center' }}>
               <span style={{ fontSize:10, color:C.txLight, fontFamily:MONO, flex:1, letterSpacing:'0.06em' }}>{filtered.length} securities ready to export</span>
               <button onClick={() => {
-                const hdr = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs50dMA','Insider','Analyst','PE peers','Summary'];
+                const hdr = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs50dMA','Insider','Analyst','% vs Peers','Summary'];
                 const rows = filtered.map((r,i) => { const g=r.signals||[]; return [i+1,r.ticker,`"${(r.company||'').replace(/"/g,'""')}"`,r.score||0,r.price||'',r.change||'',r.marketCap||'',g[0]?.value||'',g[1]?.value||'',g[2]?.value||'',g[3]?.value||'',g[4]?.value||'',g[5]?.value||'',`"${(r.summary||'').replace(/"/g,'""')}"`].join(','); });
                 const blob = new Blob([[hdr.join(',')].concat(rows).join('\n')],{type:'text/csv'});
                 const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`signals_${new Date().toISOString().slice(0,10)}.csv`; a.click();
