@@ -1,790 +1,662 @@
-// pages/api/analyse.js  v7
-//
-// Changes from v6:
-//  - Peer PE: stricter outlier trimming, PE cap lowered to 150, cross-source validation
-//  - Peer PE display: shows % above/below peer avg (e.g. "34% < peer avg 34.3x")
-//  - Insider: Nasdaq insider activity page added as primary source
-//  - Insider: strict 30-day window, deduplication added across all sources
+import { useState, useEffect, useRef, useCallback } from 'react';
+import Head from 'next/head';
  
-const FINNHUB_KEY = process.env.FINNHUB_KEY;
-const AV_KEY      = process.env.AV_KEY;
- 
-const FH  = 'https://finnhub.io/api/v1';
-const AV  = 'https://www.alphavantage.co/query';
- 
-const BROWSER = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Cache-Control': 'no-cache',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'none',
-  'Upgrade-Insecure-Requests': '1',
-};
-const API_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Origin': 'https://finance.yahoo.com',
-  'Referer': 'https://finance.yahoo.com/',
+const PRESETS = {
+  'Mega-cap':     'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH',
+  'Technology':   'AAPL,MSFT,NVDA,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT',
+  'Finance':      'JPM,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB',
+  'Healthcare':   'LLY,JNJ,UNH,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS',
+  'Energy':       'XOM,CVX,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN',
+  'Consumer':     'AMZN,TSLA,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT',
+  'International':'TSM,ASML,NVO,SAP,TM,SHEL,BHP,RIO,AZN,HSBC',
+  'Dividend':     'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
  
-async function fh(path) {
-  if (!FINNHUB_KEY) throw new Error('No FINNHUB_KEY');
-  const sep = path.includes('?') ? '&' : '?';
-  const r = await fetch(`${FH}${path}${sep}token=${FINNHUB_KEY}`, {
-    headers: { 'User-Agent': 'Mozilla/5.0' },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!r.ok) throw new Error(`Finnhub ${r.status}`);
-  const d = await r.json();
-  if (d?.error) throw new Error(d.error);
-  return d;
-}
+const SIG_LABELS = ['EPS & Rev beat','PE vs hist avg','Price vs 50d MA','Insider buying','Analyst +25% upside','PE vs peers'];
  
-async function getPage(url, timeoutMs = 9000) {
-  const r = await fetch(url, { headers: BROWSER, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.text();
-}
+const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA,F,GM'.split(','));
  
-// ── Yahoo crumb ───────────────────────────────────────────────────────────────
-let _crumb = null, _cookies = '', _crumbTs = 0;
- 
-async function getYahooCrumb() {
-  if (_crumb && Date.now() - _crumbTs < 300000) return { crumb: _crumb, cookies: _cookies };
-  try {
-    const home = await fetch('https://finance.yahoo.com/', {
-      headers: { 'User-Agent': BROWSER['User-Agent'], 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' },
-      redirect: 'follow', signal: AbortSignal.timeout(8000),
-    });
-    const setCookie = home.headers.get('set-cookie') || '';
-    _cookies = setCookie.split(',').map(c => c.split(';')[0].trim()).filter(c => c.includes('=')).join('; ');
-    for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
-      try {
-        const cr = await fetch(`${base}/v1/test/getcrumb`, {
-          headers: { 'User-Agent': BROWSER['User-Agent'], 'Accept': '*/*', 'Cookie': _cookies },
-          signal: AbortSignal.timeout(6000),
-        });
-        if (cr.ok) {
-          const text = await cr.text();
-          if (text && text.length < 50 && !text.startsWith('{')) {
-            _crumb = text.trim(); _crumbTs = Date.now();
-            return { crumb: _crumb, cookies: _cookies };
-          }
-        }
-      } catch (_) {}
-    }
-  } catch (_) {}
-  return { crumb: null, cookies: '' };
-}
- 
-async function yahooFetch(path, crumbInfo) {
-  const { crumb, cookies } = crumbInfo || {};
-  const qs = crumb ? `${path.includes('?') ? '&' : '?'}crumb=${encodeURIComponent(crumb)}` : '';
-  for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
-    try {
-      const r = await fetch(`${base}${path}${qs}`, {
-        headers: { ...API_HEADERS, ...(cookies ? { Cookie: cookies } : {}) },
-        signal: AbortSignal.timeout(7000),
-      });
-      if (r.status === 401 || r.status === 429) continue;
-      if (!r.ok) continue;
-      return await r.json();
-    } catch (_) {}
-  }
-  return null;
-}
- 
-// ── Alpha Vantage ─────────────────────────────────────────────────────────────
-const _avCache = {};
-async function fetchAV(ticker) {
-  if (_avCache[ticker]) return _avCache[ticker];
-  if (!AV_KEY) return null;
-  try {
-    const r = await fetch(`${AV}?function=OVERVIEW&symbol=${ticker}&apikey=${AV_KEY}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    if (!d?.Symbol || d?.Information || d?.Note) return null;
-    _avCache[ticker] = d;
-    return d;
-  } catch (_) { return null; }
-}
- 
-// ── stockanalysis.com ─────────────────────────────────────────────────────────
-const _saCache = {};
-async function fetchStockAnalysis(ticker) {
-  if (_saCache[ticker]) return _saCache[ticker];
-  try {
-    const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/`);
-    const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!m) return null;
-    const data = JSON.parse(m[1]);
-    const props = data?.props?.pageProps;
-    const quote = props?.data?.quote || props?.quote || null;
-    if (quote) { _saCache[ticker] = quote; return quote; }
-  } catch (_) {}
-  try {
-    const html = await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/financials/`);
-    const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!m) return null;
-    const data = JSON.parse(m[1]);
-    const fin  = data?.props?.pageProps?.data || null;
-    if (fin) { _saCache[ticker] = fin; return fin; }
-  } catch (_) {}
-  return null;
-}
- 
-function saExtract(sa, fields) {
-  if (!sa) return null;
-  for (const field of fields) {
-    const parts = field.split('.');
-    let val = sa;
-    for (const p of parts) { val = val?.[p]; if (val === undefined) break; }
-    if (val != null && val !== '' && !isNaN(parseFloat(val))) return parseFloat(val);
-  }
-  return null;
-}
- 
-// ── MarketWatch ───────────────────────────────────────────────────────────────
-const _mwCache = {};
-async function fetchMarketWatch(ticker) {
-  if (_mwCache[ticker]) return _mwCache[ticker];
-  try {
-    const html = await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}`);
-    const m1 = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-    if (m1) {
-      try { const d = JSON.parse(m1[1]); _mwCache[ticker]={type:'state',data:d}; return _mwCache[ticker]; } catch (_) {}
-    }
-    _mwCache[ticker] = { type:'html', raw:html }; return _mwCache[ticker];
-  } catch (_) { return null; }
-}
-function mwExtractPE(mw) {
-  if (!mw) return null;
-  if (mw.type==='state') {
-    const d=mw.data;
-    for (const v of [d?.instrumentData?.primaryData?.peRatio,d?.quote?.peRatio,d?.stock?.peRatio]) {
-      if (v && !isNaN(parseFloat(v))) return parseFloat(v);
-    }
-  }
-  if (mw.raw) {
-    for (const p of [/"peRatio"\s*:\s*"?([\d.]+)"?/,/P\/E Ratio[^<]*<\/span>[^<]*<span[^>]*>([\d.]+)/,/class="[^"]*pe-ratio[^"]*"[^>]*>([\d.]+)/]) {
-      const m=mw.raw.match(p); if (m) { const v=parseFloat(m[1]); if (v>0&&v<150) return v; }
-    }
-  }
-  return null;
-}
-function mwExtractEPS(mw) {
-  if (!mw?.raw) return null;
-  for (const p of [/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/,/EPS \(TTM\)[^<]*<\/[^>]+>[^<]*<[^>]+>([-\d.]+)/,/"eps"\s*:\s*([-\d.]+)/]) {
-    const m=mw.raw.match(p); if (m) { const v=parseFloat(m[1]); if (v!==0&&!isNaN(v)) return v; }
-  }
-  return null;
-}
- 
-// ── Zacks ─────────────────────────────────────────────────────────────────────
-async function fetchZacks(ticker) {
-  try { return await getPage(`https://www.zacks.com/stock/quote/${ticker.toUpperCase()}`); } catch (_) { return null; }
-}
-function zacksExtractPE(html) {
-  if (!html) return null;
-  for (const p of [/P\/E Ratio[^<]*<\/dt>[^<]*<dd[^>]*>([\d.]+)/,/"peRatio"\s*:\s*([\d.]+)/,/class="[^"]*pe_ratio[^"]*"[^>]*>([\d.]+)/,/P\/E\s*<[^>]+>\s*([\d.]+)/]) {
-    const m=html.match(p); if (m) { const v=parseFloat(m[1]); if (v>0&&v<150) return v; }
-  }
-  return null;
-}
-function zacksExtractTarget(html) {
-  if (!html) return null;
-  for (const p of [/Price Target[^<]*<[^>]+>\s*\$([\d.]+)/i,/Zacks Mean Target[^<]*<[^>]+>\s*\$([\d.]+)/i,/"targetPrice"\s*:\s*([\d.]+)/,/consensus.*?target.*?\$([\d,]+\.?\d*)/i]) {
-    const m=html.match(p); if (m) { const v=parseFloat(m[1].replace(/,/g,'')); if (v>0) return v; }
-  }
-  return null;
-}
- 
-// ── Macrotrends ───────────────────────────────────────────────────────────────
-async function fetchMacrotrendsEPS(ticker) {
-  try {
-    const html = await getPage(`https://www.macrotrends.net/stocks/charts/${ticker.toUpperCase()}/x/eps-earnings-per-share-diluted`, 10000);
-    const m = html.match(/var\s+chartData\s*=\s*(\[[\s\S]*?\]);/);
-    if (m) { const arr=JSON.parse(m[1]); const r=arr.filter(a=>a?.[1]!=null&&!isNaN(parseFloat(a[1]))).slice(0,4); if (r.length>0) return parseFloat(r[0][1]); }
-  } catch (_) {}
-  return null;
-}
- 
-// ── SEC EDGAR ─────────────────────────────────────────────────────────────────
-const _cikCache = {};
-async function getSecCIK(ticker) {
-  if (_cikCache[ticker]) return _cikCache[ticker];
-  try {
-    const r = await fetch('https://www.sec.gov/files/company_tickers.json', { headers:{'User-Agent':'signal-engine/1.0 admin@example.com'}, signal:AbortSignal.timeout(8000) });
-    if (r.ok) { const j=await r.json(); for (const e of Object.values(j)) { if (e.ticker?.toUpperCase()===ticker.toUpperCase()) { const cik=String(e.cik_str).padStart(10,'0'); _cikCache[ticker]=cik; return cik; } } }
-  } catch (_) {}
-  return null;
-}
-async function fetchSecEPS(ticker) {
-  try {
-    const cik = await getSecCIK(ticker); if (!cik) return null;
-    const r = await fetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`, { headers:{'User-Agent':'signal-engine/1.0 admin@example.com'}, signal:AbortSignal.timeout(12000) });
-    if (!r.ok) return null;
-    const d=await r.json(); const facts=d?.facts?.['us-gaap'];
-    for (const key of ['EarningsPerShareBasic','EarningsPerShareDiluted','EarningsPerShareBasicAndDiluted']) {
-      const units=facts?.[key]?.units?.['USD/shares']||[];
-      const annual=units.filter(e=>e.form==='10-K').sort((a,b)=>new Date(b.end)-new Date(a.end));
-      if (annual.length>0&&annual[0].val!=null) return annual[0].val;
-      const qtrs=units.filter(e=>e.form==='10-Q').sort((a,b)=>new Date(b.end)-new Date(a.end)).slice(0,4);
-      if (qtrs.length===4) { const ttm=qtrs.reduce((s,q)=>s+(q.val||0),0); if (ttm!==0) return ttm; }
-    }
-  } catch (_) {}
-  return null;
-}
- 
-// ─────────────────────────────────────────────────────────────────────────────
-// Format helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function fmt$M(n) { return !n||n===0?null:n>=1e9?`$${(n/1e9).toFixed(2)}B`:n>=1e6?`$${(n/1e6).toFixed(2)}M`:n>=1e3?`$${(n/1e3).toFixed(0)}K`:`$${n.toFixed(0)}`; }
-function fmtSh(n) { return !n||n===0?null:n>=1e6?`${(n/1e6).toFixed(2)}M shares`:n>=1e3?`${(n/1e3).toFixed(1)}K shares`:`${n.toLocaleString()} shares`; }
-function timeAgo(ds) {
-  if (!ds) return null; const d=new Date(ds); if (isNaN(d)) return null;
-  const days=Math.floor((Date.now()-d)/86400000);
-  return days===0?'today':days===1?'1d ago':days<7?`${days}d ago`:days<14?'1w ago':days<30?`${Math.floor(days/7)}w ago`:`${Math.floor(days/30)}mo ago`;
-}
- 
-// ─────────────────────────────────────────────────────────────────────────────
-// Signal resolvers
-// ─────────────────────────────────────────────────────────────────────────────
-function compute50dMA(closes) {
-  if (!Array.isArray(closes)) return null;
-  const v=closes.filter(c=>c!=null&&!isNaN(c)&&c>0);
-  if (v.length<20) return null;
-  const sl=v.slice(-50);
-  return sl.reduce((a,b)=>a+b,0)/sl.length;
-}
- 
-async function resolveMA50(ticker, avData, crumbInfo, yahooChartData) {
-  const av=parseFloat(avData?.['50DayMovingAverage']); if (av>0&&!isNaN(av)) return av;
-  const yhCloses=yahooChartData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
-  const yhMA=compute50dMA(yhCloses); if (yhMA>0) return yhMA;
-  try { const to=Math.floor(Date.now()/1000),from=to-90*86400,d=await fh(`/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}`); if (d?.s==='ok'&&Array.isArray(d.c)&&d.c.length>=20){const ma=compute50dMA(d.c);if(ma>0)return ma;} } catch(_){}
-  try { const j=await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`,crumbInfo); const ma=j?.quoteSummary?.result?.[0]?.summaryDetail?.fiftyDayAverage?.raw; if(ma>0)return ma; } catch(_){}
-  try { const j=await yahooFetch(`/v8/finance/chart/${ticker}?interval=1d&range=3mo`,crumbInfo); const closes=j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[]; const ma=compute50dMA(closes); if(ma>0)return ma; } catch(_){}
-  try { const sa=await fetchStockAnalysis(ticker); const ma=saExtract(sa,['ma50','movingAverage50','fiftyDayAverage','avg50']); if(ma>0)return ma; } catch(_){}
-  try {
-    const r=await fetch(`https://stooq.com/q/d/l/?s=${ticker.toLowerCase()}.us&i=d`,{headers:{'User-Agent':'Mozilla/5.0'},signal:AbortSignal.timeout(8000)});
-    if(r.ok){const text=await r.text();if(text.length>100&&!text.toLowerCase().includes('no data')){const lines=text.trim().split('\n').slice(1);const closes=lines.slice(-60).map(l=>parseFloat((l.split(',')[4]||'').trim())).filter(c=>!isNaN(c)&&c>0);const ma=compute50dMA(closes);if(ma>0)return ma;}}
-  } catch(_){}
-  return null;
-}
- 
-async function resolveEPS(ticker, avData, fhMetric, crumbInfo) {
-  const avEPS=parseFloat(avData?.EPS); if(!isNaN(avEPS)&&avEPS!==0) return avEPS;
-  const fhEPS=fhMetric?.epsTTM||fhMetric?.epsBasicExclExtraAnnual; if(fhEPS&&fhEPS!==0) return fhEPS;
-  try { const j=await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=defaultKeyStatistics`,crumbInfo); const eps=j?.quoteSummary?.result?.[0]?.defaultKeyStatistics?.trailingEps?.raw; if(eps!=null&&eps!==0)return eps; } catch(_){}
-  try { const j=await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=earningsHistory`,crumbInfo); const h=j?.quoteSummary?.result?.[0]?.earningsHistory?.history||[]; if(h.length>=2){const ttm=h.slice(-4).reduce((s,q)=>s+(q?.epsActual?.raw||0),0);if(ttm!==0)return ttm;} } catch(_){}
-  try { const sa=await fetchStockAnalysis(ticker); const eps=saExtract(sa,['eps','epsTrailingTwelveMonths','epsTTM','earningsPerShare','netEPS','annualEPS']); if(eps!=null&&eps!==0)return eps; } catch(_){}
-  try { const mw=await fetchMarketWatch(ticker); const eps=mwExtractEPS(mw); if(eps!=null&&eps!==0)return eps; } catch(_){}
-  try { const eps=await fetchMacrotrendsEPS(ticker); if(eps!=null&&eps!==0)return eps; } catch(_){}
-  try { const eps=await fetchSecEPS(ticker); if(eps!=null&&eps!==0)return eps; } catch(_){}
-  try { const html=await fetchZacks(ticker); if(html){const m=html.match(/EPS\s*\(TTM\)[^<]*<[^>]+>\s*\$?\s*([-\d.]+)/i)||html.match(/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/);if(m){const v=parseFloat(m[1]);if(v!==0&&!isNaN(v))return v;}} } catch(_){}
-  return null;
-}
- 
-async function resolvePE(ticker, avData, fhMetric, crumbInfo, yahooChartData) {
-  const avPE=parseFloat(avData?.PERatio); if(!isNaN(avPE)&&avPE>0&&avPE<150) return avPE;
-  const fhPE=fhMetric?.peBasicExclExtraTTM||fhMetric?.peTTM; if(fhPE>0&&fhPE<150) return fhPE;
-  const yhPE=yahooChartData?.chart?.result?.[0]?.meta?.trailingPE; if(yhPE>0&&yhPE<150) return yhPE;
-  try { const j=await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=summaryDetail`,crumbInfo); const pe=j?.quoteSummary?.result?.[0]?.summaryDetail?.trailingPE?.raw; if(pe>0&&pe<150)return pe; } catch(_){}
-  try { const sa=await fetchStockAnalysis(ticker); const pe=saExtract(sa,['pe','peRatio','priceEarnings','trailingPE','forwardPE']); if(pe>0&&pe<150)return pe; } catch(_){}
-  try { const mw=await fetchMarketWatch(ticker); const pe=mwExtractPE(mw); if(pe>0&&pe<150)return pe; } catch(_){}
-  try { const html=await fetchZacks(ticker); const pe=zacksExtractPE(html); if(pe>0&&pe<150)return pe; } catch(_){}
-  return null;
-}
- 
-async function resolveTarget(ticker, avData, crumbInfo) {
-  const avT=parseFloat(avData?.AnalystTargetPrice); if(!isNaN(avT)&&avT>0) return avT;
-  try { const d=await fh(`/stock/price-target?symbol=${ticker}`); const t=d?.targetMedian||d?.targetMean; if(t>0)return t; } catch(_){}
-  try { const j=await yahooFetch(`/v10/finance/quoteSummary/${ticker}?modules=financialData`,crumbInfo); const fd=j?.quoteSummary?.result?.[0]?.financialData; const t=fd?.targetMedianPrice?.raw||fd?.targetMeanPrice?.raw; if(t>0)return t; } catch(_){}
-  try {
-    const html=await getPage(`https://stockanalysis.com/stocks/${ticker.toLowerCase()}/forecast/`);
-    const m=html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if(m){const d=JSON.parse(m[1]);const ppts=d?.props?.pageProps;const t=ppts?.data?.priceTarget||ppts?.priceTarget||saExtract(ppts,['data.priceTarget','data.targetPrice','data.analystTarget','priceTarget']);if(t>0)return t;}
-    for (const p of [/price\s+target[^$<]*\$\s*([\d,]+\.?\d*)/i,/consensus[^$<]*\$\s*([\d,]+\.?\d*)/i,/target\s+price[^$<]*\$\s*([\d,]+\.?\d*)/i]) {
-      const match=html.match(p); if(match){const v=parseFloat(match[1].replace(/,/g,''));if(v>0&&v<100000)return v;}
-    }
-  } catch(_){}
-  try { const html=await fetchZacks(ticker); const t=zacksExtractTarget(html); if(t>0)return t; } catch(_){}
-  try {
-    const html=await getPage(`https://www.marketwatch.com/investing/stock/${ticker.toLowerCase()}/analystestimates`);
-    for (const p of [/target\s*price[^$<]*\$\s*([\d,]+\.?\d*)/i,/mean\s*target[^$<]*\$\s*([\d,]+\.?\d*)/i]) {
-      const m=html.match(p); if(m){const v=parseFloat(m[1].replace(/,/g,''));if(v>0)return v;}
-    }
-  } catch(_){}
-  return null;
-}
- 
-function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
-  let hi=fhMetric?.['52WeekHigh']||parseFloat(avData?.['52WeekHigh'])||yahooChartMeta?.fiftyTwoWeekHigh||null;
-  let lo=fhMetric?.['52WeekLow'] ||parseFloat(avData?.['52WeekLow']) ||yahooChartMeta?.fiftyTwoWeekLow ||null;
-  if(isNaN(hi))hi=null; if(isNaN(lo))lo=null;
-  if((!hi||!lo)&&yahooChartCloses.length>50){if(!hi)hi=Math.max(...yahooChartCloses);if(!lo)lo=Math.min(...yahooChartCloses);}
-  return {hi52:hi,lo52:lo};
-}
- 
-// ─────────────────────────────────────────────────────────────────────────────
-// Insider transactions
-//
-// Source priority (server-side reliability):
-//   1. Finnhub  — authenticated API, always works server-side
-//   2. OpenInsider — public HTML scraper, reliable fallback
-//   3. Nasdaq API — last resort (sometimes blocks server IPs)
-//
-// All sources: 30-day window, dedup by date+shares+type, $500M per-tx cap,
-// open-market Purchase (P) and Sale (S) only.
-// ─────────────────────────────────────────────────────────────────────────────
- 
-const MAX_TX_VALUE = 500e6;
- 
-async function resolveInsider(ticker) {
-  const now   = Math.floor(Date.now() / 1000);
-  const ago30 = now - 30 * 86400;
-  const from  = new Date(ago30 * 1000).toISOString().slice(0, 10);
-  const to    = new Date(now   * 1000).toISOString().slice(0, 10);
-  const cut30 = new Date(ago30 * 1000);
- 
-  // ── 1. Finnhub ─────────────────────────────────────────────────────────────
-  try {
-    const d = await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
-    const txns = (d?.data || []).filter(t => {
-      const dt = new Date(t.transactionDate);
-      return !isNaN(dt) && dt >= cut30;
-    });
-    const seen = new Set();
-    const unique = txns.filter(t => {
-      const key = `${t.name}|${t.transactionDate}|${t.share}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    const buys  = unique.filter(t => t.transactionCode === 'P' && (t.value || 0) <= MAX_TX_VALUE);
-    const sells = unique.filter(t => t.transactionCode === 'S' && (t.value || 0) <= MAX_TX_VALUE);
-    if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'finnhub' };
-  } catch (_) {}
- 
-  // ── 2. OpenInsider ─────────────────────────────────────────────────────────
-  try {
-    const r = await fetch(
-      `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
-      { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) }
-    );
-    if (r.ok) {
-      const html = await r.text();
-      const rows = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
-      const buys = [], sells = [], seen = new Set();
-      for (const row of rows) {
-        const cells = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
-        if (cells.length < 10) continue;
-        const [, dateStr, , , type, , , , sharesRaw, valueRaw] = cells;
-        if (!dateStr || !type) continue;
-        const txDate = new Date(dateStr);
-        if (isNaN(txDate) || txDate < cut30) continue;
-        const shares = parseInt((sharesRaw || '').replace(/[^0-9]/g, '')) || 0;
-        const value  = parseInt((valueRaw  || '').replace(/[^0-9]/g, '')) || 0;
-        if (value > MAX_TX_VALUE) continue;
-        const key = `${dateStr}|${shares}|${type}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const entry = { transactionDate: dateStr, share: shares, value, transactionPrice: shares > 0 ? value / shares : 0 };
-        if (/P\s*-\s*Purchase/i.test(type)) buys.push(entry);
-        else if (/S\s*-\s*Sale/i.test(type)) sells.push(entry);
-      }
-      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'openinsider' };
-    }
-  } catch (_) {}
- 
-  // ── 3. Nasdaq JSON API (last resort — may be blocked from Vercel IPs) ──────
-  try {
-    const url = `https://api.nasdaq.com/api/company/${ticker.toLowerCase()}/insider-trades?limit=40&type=ALL&sortColumn=lastDate&sortOrder=DESC`;
-    const r = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Origin': 'https://www.nasdaq.com',
-        'Referer': 'https://www.nasdaq.com/',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (r.ok) {
-      const json = await r.json();
-      const rows = json?.data?.insiderTrades?.rows || json?.data?.rows || json?.rows || [];
-      const buys = [], sells = [], seen = new Set();
-      for (const row of rows) {
-        const dateStr   = row?.lastDate || row?.date || row?.transactionDate;
-        const typeRaw   = (row?.transactionType || row?.type || '').trim();
-        const sharesRaw = String(row?.shares || row?.sharesTraded || '0');
-        const valueRaw  = String(row?.value  || row?.transactionValue || '0');
-        if (!dateStr) continue;
-        const txDate = new Date(dateStr);
-        if (isNaN(txDate) || txDate < cut30) continue;
-        const isPurchase = /^P$/i.test(typeRaw) || /purchase/i.test(typeRaw);
-        const isSale     = /^S$/i.test(typeRaw) || /sale/i.test(typeRaw);
-        if (!isPurchase && !isSale) continue;
-        const shares = parseInt(sharesRaw.replace(/[^0-9]/g, '')) || 0;
-        const value  = parseInt(valueRaw.replace(/[^0-9]/g, ''))  || 0;
-        if (value > MAX_TX_VALUE) continue;
-        const key = `${dateStr}|${shares}|${typeRaw}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const entry = { transactionDate: dateStr, share: shares, value, transactionPrice: shares > 0 && value > 0 ? value / shares : 0 };
-        if (isPurchase) buys.push(entry);
-        else            sells.push(entry);
-      }
-      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'nasdaq' };
-    }
-  } catch (_) {}
- 
-  return { buys: [], sells: [], source: null };
-}
-function buildInsider(buys, sells, source) {
-  if (buys.length > 0) {
-    const sh = buys.reduce((s, t) => s + (t.share || 0), 0);
-    // Use t.value when present (it is already total dollars for that transaction).
-    // Fall back to shares × price ONLY when value is absent AND price < $10,000
-    // (i.e. it looks like a per-share price, not a total).
-    const val = buys.reduce((s, t) => {
-      if (t.value && t.value > 0) return s + t.value;
-      const px = t.transactionPrice || 0;
-      if (px > 0 && px < 10000 && (t.share || 0) > 0) return s + px * t.share;
-      return s;
-    }, 0);
-    const parts = [`${buys.length} buy${buys.length > 1 ? 's' : ''}`];
-    const sv = fmtSh(sh);  if (sv) parts.push(sv);
-    const dv = fmt$M(val); if (dv) parts.push(dv);
-    const dates = buys.map(t => t.transactionDate).filter(Boolean).sort().reverse();
-    const rc = dates[0] ? timeAgo(dates[0]) : null; if (rc) parts.push(rc);
-    return { status: 'pass', value: parts.join(' · ') };
-  }
-  if (sells.length > 0) {
-    const sh = sells.reduce((s, t) => s + (t.share || 0), 0);
-    const val = sells.reduce((s, t) => {
-      if (t.value && t.value > 0) return s + t.value;
-      const px = t.transactionPrice || 0;
-      if (px > 0 && px < 10000 && (t.share || 0) > 0) return s + px * t.share;
-      return s;
-    }, 0);
-    const parts = [`${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys`];
-    const sv = fmtSh(sh);  if (sv) parts.push(sv);
-    const dv = fmt$M(val); if (dv) parts.push(dv);
-    const dates = sells.map(t => t.transactionDate).filter(Boolean).sort().reverse();
-    const rc = dates[0] ? timeAgo(dates[0]) : null; if (rc) parts.push(rc);
-    return { status: 'fail', value: parts.join(' · ') };
-  }
-  return { status: 'neutral', value: source ? 'No activity (30d)' : 'No data' };
-}
- 
-// ─────────────────────────────────────────────────────────────────────────────
-// Peer PE — cross-validated sources, aggressive outlier trimming, PE cap 150
-// ─────────────────────────────────────────────────────────────────────────────
-const PEERS = {
-  AAPL:['MSFT','GOOGL','META','AMZN','NVDA'],  MSFT:['AAPL','GOOGL','CRM','ORCL','IBM'],
-  GOOGL:['META','MSFT','AMZN','SNAP','TTD'],    META:['GOOGL','SNAP','PINS','TTD'],
-  AMZN:['MSFT','GOOGL','WMT','COST'],           NVDA:['AMD','INTC','QCOM','AVGO','TXN'],
-  TSLA:['GM','F','TM','RIVN'],                  AVGO:['QCOM','TXN','ADI','MRVL','AMD'],
-  ORCL:['SAP','MSFT','CRM','IBM','WDAY'],       AMD:['NVDA','INTC','QCOM','TXN','MU'],
-  INTC:['AMD','NVDA','QCOM','TXN','AVGO'],      QCOM:['AVGO','TXN','ADI','MRVL','AMD'],
-  JPM:['BAC','WFC','C','GS','MS'],              BAC:['JPM','WFC','C','USB','PNC'],
-  WFC:['JPM','BAC','C','USB','PNC'],            GS:['MS','JPM','C','BLK','SCHW'],
-  MS:['GS','JPM','C','BLK','SCHW'],             BLK:['SCHW','MS','GS','IVZ'],
-  LLY:['NVO','PFE','MRK','ABBV','BMY'],         JNJ:['PFE','ABBV','MRK','TMO','ABT'],
-  UNH:['CVS','CI','HUM','ELV','CNC'],           ABBV:['PFE','LLY','MRK','BMY','REGN'],
-  MRK:['PFE','JNJ','ABBV','LLY','BMY'],         PFE:['MRK','JNJ','ABBV','BMY','LLY'],
-  TMO:['DHR','A','WAT','BIO','IDXX'],           ABT:['MDT','BSX','SYK','BDX','EW'],
-  AMGN:['REGN','BIIB','VRTX','BMY','GILD'],     CVS:['WBA','CI','UNH','HUM','ELV'],
-  XOM:['CVX','COP','SLB','EOG','OXY'],          CVX:['XOM','COP','SLB','EOG','DVN'],
-  COP:['EOG','XOM','CVX','DVN','OXY'],          EOG:['COP','DVN','OXY','MRO','HES'],
-  HD:['LOW','WMT','TGT','COST'],                LOW:['HD','WMT','TGT','COST'],
-  WMT:['TGT','COST','KR','HD'],                 TGT:['WMT','COST','HD','KR','DG'],
-  COST:['WMT','TGT','HD'],                      MCD:['YUM','CMG','QSR','DRI'],
-  NKE:['UAA','DECK','LULU','SKX'],              SBUX:['MCD','CMG','YUM','QSR'],
-  KO:['PEP','MDLZ','MNST','KHC'],              PEP:['KO','MDLZ','MNST','KHC'],
-  PM:['MO','BTI'],                               MO:['PM','BTI'],
-  T:['VZ','TMUS','CMCSA','CHTR'],               VZ:['T','TMUS','CMCSA','CHTR'],
-  TMUS:['T','VZ','CMCSA'],                      CAT:['DE','HON','EMR','ITW','PH'],
-  DE:['CAT','AGCO','HON'],                       HON:['CAT','EMR','ITW','ROK','ETN'],
-  GE:['HON','RTX','EMR','ETN'],                 RTX:['LMT','NOC','GD','BA'],
-  LMT:['NOC','RTX','GD','BA'],                  UPS:['FDX','XPO','ODFL'],
-  FDX:['UPS','XPO','ODFL'],                      IBM:['MSFT','ORCL','HPE','ACN'],
-  NEE:['DUK','SO','AEP','EXC','D'],             AMT:['PLD','EQIX','CCI','SPG','O'],
-  NFLX:['DIS','WBD','PARA','ROKU'],             DIS:['NFLX','WBD','PARA','CMCSA'],
-  MA:['V','PYPL','AXP','FIS'],                  V:['MA','PYPL','AXP','FIS'],
-  SPGI:['MCO','ICE','CME','MSCI'],
+const C = {
+  pageBg:'#F1EFE8', cardBg:'#E8E5DC', deepBg:'#3A3832', darkBg:'#5F5E56',
+  border:'rgba(95,94,86,0.2)', borderDk:'rgba(95,94,86,0.4)',
+  tx:'#2C2C2A', txMid:'#5F5E56', txLight:'#9A9890',
+  gold:'#B8A070', accent:'#8B7D6B', accentDk:'#6B5D4F',
+  green:'#4A6741', greenBg:'#DDE8D8', greenBd:'#A8C0A0',
+  red:'#7A3A30',   redBg:'#F0DDD9',   redBd:'#C8A09A',
+  amber:'#AC8431', amberBg:'#F1E8C8', amberBd:'#CCB164',
+  dkGreen:'#4A6741', dkGreenBg:'#D8E8D0', dkGreenBd:'#98B890',
+  dkRed:'#7A3A30',   dkRedBg:'#EDD8D8',   dkRedBd:'#C09898',
+  dkAmber:'#7A6428', dkAmberBg:'#EBE3C8', dkAmberBd:'#C4B060',
 };
  
-const _pePeerCache = {};
+const FONTS="'Cormorant Garamond','Georgia',serif";
+const SANS ="'DM Sans','Helvetica Neue',sans-serif";
+const MONO ="'DM Mono','Courier New',monospace";
  
-async function getPeerPE(peer, crumbInfo) {
-  if (_pePeerCache[peer]) return _pePeerCache[peer];
-  const candidates = [];
+const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
+const PAGE_SIZE   = 3;
+const TOTAL_PICKS = 9;
  
-  // Source 1: Yahoo chart meta
-  try {
-    const j=await yahooFetch(`/v8/finance/chart/${peer}?interval=1d&range=5d`,crumbInfo);
-    const pe=j?.chart?.result?.[0]?.meta?.trailingPE, mc=j?.chart?.result?.[0]?.meta?.marketCap||0;
-    if (pe>0&&pe<150) candidates.push({pe,mc,src:'yahoo'});
-  } catch(_){}
- 
-  // Source 2: Finnhub metric
-  try {
-    const d=await fh(`/stock/metric?symbol=${peer}&metric=all`);
-    const pe=d?.metric?.peBasicExclExtraTTM||d?.metric?.peTTM, mc=(d?.metric?.marketCapitalization||0)*1e6;
-    if (pe>0&&pe<150) candidates.push({pe,mc,src:'finnhub'});
-  } catch(_){}
- 
-  // Source 3: Alpha Vantage (only if needed)
-  if (AV_KEY&&candidates.length<2) {
-    try {
-      const d=await fetchAV(peer);
-      const pe=parseFloat(d?.PERatio), mc=parseFloat(d?.MarketCapitalization)||0;
-      if (!isNaN(pe)&&pe>0&&pe<150) candidates.push({pe,mc,src:'av'});
-    } catch(_){}
-  }
- 
-  // Source 4: stockanalysis (last resort)
-  if (candidates.length<2) {
-    try {
-      const sa=await fetchStockAnalysis(peer);
-      const pe=saExtract(sa,['pe','peRatio','trailingPE']), mc=saExtract(sa,['marketCap','marketCapitalization'])||0;
-      if (pe>0&&pe<150) candidates.push({pe,mc,src:'sa'});
-    } catch(_){}
-  }
- 
-  if (!candidates.length) return null;
- 
-  // Cross-validate: if 2+ sources agree within 40%, use median; otherwise take lower
-  let pe, mc;
-  if (candidates.length>=2) {
-    const pes=candidates.map(c=>c.pe).sort((a,b)=>a-b);
-    const spread=(pes[pes.length-1]-pes[0])/pes[0];
-    pe = spread>0.4 ? pes[0] : pes[Math.floor(pes.length/2)];
-    mc = candidates[0].mc;
-  } else {
-    pe = candidates[0].pe;
-    mc = candidates[0].mc;
-  }
- 
-  _pePeerCache[peer] = {ticker:peer, pe, mc};
-  return _pePeerCache[peer];
+// Score colours:
+//   0–2  → muted bronze/grey
+//   3    → warm amber (watch)
+//   4    → light sage green
+//   5    → medium green
+//   6    → gold (best)
+function scoreColor(sc, dark = false) {
+  if (sc === 6) return C.gold;
+  if (sc === 5) return dark ? '#7DB87A' : '#5A8F57';   // medium green
+  if (sc === 4) return dark ? '#9ECB8A' : '#72A860';   // light sage green
+  if (sc === 3) return dark ? '#C8A870' : C.amber;     // amber
+  return dark ? 'rgba(154,152,144,0.55)' : C.txLight;  // muted
 }
  
-async function resolvePeerPE(ticker, curPE, targetMC, crumbInfo) {
-  try {
-    let peerList=[];
-    try { const pd=await fh(`/stock/peers?symbol=${ticker}`); if(Array.isArray(pd))peerList=pd.filter(p=>p!==ticker&&/^[A-Z]{1,5}$/.test(p)); } catch(_){}
-    if (PEERS[ticker]) peerList=[...new Set([...peerList,...PEERS[ticker]])].filter(p=>p!==ticker);
-    peerList=peerList.slice(0,10);
-    if (!peerList.length) return null;
- 
-    // Fetch all peers in parallel — no more 2-at-a-time batching
-    const res = await Promise.allSettled(peerList.map(p => getPeerPE(p, crumbInfo)));
-    const all = res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
-    if (!all.length) return null;
- 
-    // Market-cap tier filter
-    let comps=all;
-    if (targetMC>0&&all.filter(c=>c.mc>0).length>=2) {
-      const lo=targetMC>500000?0.07:0.12, hi=targetMC>500000?14:8;
-      const f=all.filter(c=>c.mc===0||(c.mc/1e6/targetMC>=lo&&c.mc/1e6/targetMC<=hi));
-      if (f.length>=2) comps=f;
-    }
- 
-    // Aggressive outlier removal
-    if (comps.length>=5) {
-      const s=[...comps].sort((a,b)=>a.pe-b.pe);
-      const trim=Math.max(1,Math.floor(s.length*0.2)); // remove top+bottom 20%
-      comps=s.slice(trim,s.length-trim);
-    } else if (comps.length>=3) {
-      // Drop any peer PE more than 2.5x the median
-      const s=[...comps].sort((a,b)=>a.pe-b.pe);
-      const median=s[Math.floor(s.length/2)].pe;
-      comps=s.filter(c=>c.pe<=median*2.5);
-    }
- 
-    if (comps.length<2) return null;
- 
-    const pes=comps.map(c=>c.pe).sort((a,b)=>a-b);
-    const mid=Math.floor(pes.length/2);
-    const med=pes.length%2===0?(pes[mid-1]+pes[mid])/2:pes[mid];
-    const avg=pes.reduce((a,b)=>a+b,0)/pes.length;
-    const diff=curPE&&curPE>0?parseFloat(((curPE-avg)/avg*100).toFixed(1)):null;
- 
-    return {
-      medianPE: parseFloat(med.toFixed(1)),
-      avgPE:    parseFloat(avg.toFixed(1)),
-      peerCount:comps.length,
-      diff,
-      peers:    comps.map(c=>c.ticker),
-    };
-  } catch(_){ return null; }
+function getRating(sc) {
+  if (sc >= 5) return { label:'Strong Buy', color:'#14532d', bg:'#dcfce7', border:'#86efac' };
+  if (sc === 4) return { label:'Buy',        color:'#4A6741', bg:'#E8EEDF', border:'#B0C8A8' };
+  if (sc === 3) return { label:'Watch',      color:'#7A6030', bg:'#F0E8D0', border:'#C8A870' };
+  return               { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// Misc helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function getRating(s){
-  if(s>=5)return{label:'Strong Buy',color:'#14532d',bg:'#dcfce7',border:'#86efac'};
-  if(s===4)return{label:'Buy',color:'#15803d',bg:'#f0fdf4',border:'#bbf7d0'};
-  if(s===3)return{label:'Watch',color:'#92400e',bg:'#fffbeb',border:'#fde68a'};
-  return{label:'Ignore',color:'#6b7280',bg:'#f9fafb',border:'#d1d5db'};
-}
-function cleanExchange(raw){
-  if(!raw)return'NYSE';
-  const u=raw.toUpperCase();
-  if(u.includes('NASDAQ'))return'NASDAQ';
-  if(u.includes('NYSE'))return'NYSE';
-  if(u.includes('LSE')||u.includes('LONDON'))return'LSE';
-  if(u.includes('TSX')||u.includes('TORONTO'))return'TSX';
-  return raw.split(/[\s,]/)[0].toUpperCase()||'NYSE';
-}
- 
-// ─────────────────────────────────────────────────────────────────────────────
-// Master fetch
-// ─────────────────────────────────────────────────────────────────────────────
-async function fetchStockData(ticker, crumbInfo) {
-  const [quoteR,profileR,metricsR,earningsR,yhChartR,avR]=await Promise.allSettled([
-    fh(`/quote?symbol=${ticker}`),
-    fh(`/stock/profile2?symbol=${ticker}`),
-    fh(`/stock/metric?symbol=${ticker}&metric=all`),
-    fh(`/stock/earnings?symbol=${ticker}&limit=4`),
-    yahooFetch(`/v8/finance/chart/${ticker}?interval=1d&range=1y`,crumbInfo),
-    fetchAV(ticker),
-  ]);
-  const curPx  =quoteR.status==='fulfilled'   ?quoteR.value?.c            :null;
-  const fhM    =metricsR.status==='fulfilled'  ?metricsR.value?.metric||{} :{};
-  const avData =avR.status==='fulfilled'        ?avR.value                  :null;
-  const yhChart=yhChartR.status==='fulfilled'   ?yhChartR.value             :null;
-  const yhMeta =yhChart?.chart?.result?.[0]?.meta||{};
-  const yhClose=yhChart?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
-  const [eps,ma50,curPE,analystTarget,insiderData]=await Promise.all([
-    resolveEPS(ticker,avData,fhM,crumbInfo),
-    resolveMA50(ticker,avData,crumbInfo,yhChart),
-    resolvePE(ticker,avData,fhM,crumbInfo,yhChart),
-    resolveTarget(ticker,avData,crumbInfo),
-    resolveInsider(ticker),
-  ]);
-  const {hi52,lo52}=resolve52w(avData,fhM,yhMeta,yhClose);
-  const peerPE=await resolvePeerPE(ticker,curPE,fhM.marketCapitalization||0,crumbInfo);
-  return {
-    quote:   quoteR.status==='fulfilled'   ?quoteR.value   :null,
-    profile: profileR.status==='fulfilled' ?profileR.value :null,
-    earnings:earningsR.status==='fulfilled'?earningsR.value:null,
-    hi52,lo52,curPE,eps,ma50,analystTarget,insiderData,peerPE,
+function ScoreDots({ score, max = 6, dark = false }) {
+  // Each filled dot uses the colour for *that position*, not the overall score colour.
+  // Dots 1-3 fill amber/bronze; dot 4 = light green; dot 5 = medium green; dot 6 = gold.
+  const dotColor = (i) => {
+    const pos = i + 1; // 1-indexed
+    if (pos > score) return null; // unfilled
+    if (pos === 6) return C.gold;
+    if (pos === 5) return dark ? '#7DB87A' : '#5A8F57';
+    if (pos === 4) return dark ? '#9ECB8A' : '#72A860';
+    if (pos === 3) return dark ? '#C8A870' : C.amber;
+    return dark ? 'rgba(184,160,112,0.65)' : 'rgba(172,132,49,0.55)'; // pos 1-2
   };
+  const emptyRing = dark ? 'rgba(95,94,86,0.45)' : C.borderDk;
+  return (
+    <div style={{ display: 'flex', gap: 4 }}>
+      {Array.from({ length: max }).map((_, i) => {
+        const col = dotColor(i);
+        return (
+          <div key={i} style={{
+            width: 7, height: 7, borderRadius: '50%',
+            background: col || 'transparent',
+            border: `1.5px solid ${col || emptyRing}`,
+            transition: 'all 0.3s',
+          }} />
+        );
+      })}
+    </div>
+  );
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// Evaluate
-// ─────────────────────────────────────────────────────────────────────────────
-function evaluate(ticker, d) {
-  const q=d.quote||{},p=d.profile||{};
-  const curPx=q.c;
-  if (!curPx) return null;
-  const company=p.name||ticker;
-  const mc=p.marketCapitalization?p.marketCapitalization*1e6:0;
-  const mcs=mc>1e12?`$${(mc/1e12).toFixed(2)}T`:mc>1e9?`$${(mc/1e9).toFixed(1)}B`:mc>1e6?`$${(mc/1e6).toFixed(0)}M`:'';
-  const exchange=cleanExchange(p.exchange);
+function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }) {
+  const noData = loading || !sig.value || sig.value === '--' || sig.value === 'No data';
+  const p = sig.status === 'pass', f = sig.status === 'fail';
  
-  // S1 — EPS beat
-  let s1={status:'neutral',value:'No data'};
-  try {
-    const earns=Array.isArray(d.earnings)?d.earnings:[];
-    if (earns.length>0){const e=earns[0],diff=e.actual-e.estimate,beat=diff>=0;const ds=Math.abs(diff)<0.005?'in-line':beat?`+$${Math.abs(diff).toFixed(2)}`:`-$${Math.abs(diff).toFixed(2)}`;s1={status:beat?'pass':'fail',value:beat?`Beat by ${ds}`:`Missed ${ds}`};}
-  } catch(_){}
+  const bg  = dark ? p?C.dkGreenBg : f?C.dkRedBg  : C.dkAmberBg
+                   : p?C.greenBg   : f?C.redBg     : C.amberBg;
+  const col = dark ? p?C.dkGreen   : f?C.dkRed     : C.dkAmber
+                   : p?C.green     : f?C.red        : C.amber;
+  const bd  = dark ? p?C.dkGreenBd : f?C.dkRedBd   : C.dkAmberBd
+                   : p?C.greenBd   : f?C.redBd      : C.amberBd;
  
-  // S2 — PE vs hist avg
-  let s2={status:'neutral',value:'No data'};
-  try {
-    if (d.curPE&&d.curPE>0&&d.eps&&d.eps!==0&&d.hi52&&d.lo52&&d.hi52>d.lo52){
-      const histPE=(d.hi52+d.lo52)/2/d.eps;
-      if (histPE>0&&histPE<1000){
-        if      (d.curPE<histPE*0.92)s2={status:'pass',  value:`PE ${d.curPE.toFixed(1)}x < hist ~${histPE.toFixed(0)}x`};
-        else if (d.curPE>histPE*1.08)s2={status:'fail',  value:`PE ${d.curPE.toFixed(1)}x > hist ~${histPE.toFixed(0)}x`};
-        else                         s2={status:'neutral',value:`PE ${d.curPE.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x`};
+  const isClickable = noData && !loading && onRetry;
+ 
+  const pillBg  = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
+    ? (dark ? C.dkAmberBg : C.amberBg) : bg;
+  const pillCol = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
+    ? (dark ? C.dkAmber : C.amber) : col;
+  const pillBd  = (!sig.value || sig.value === '--' || sig.value === 'No data') && !loading
+    ? `0.5px dashed ${dark ? C.dkAmberBd : C.amberBd}`
+    : `0.5px solid ${bd}`;
+ 
+  return (
+    <div
+      onClick={isClickable ? () => onRetry(signalIndex) : undefined}
+      title={isClickable ? `Click to retry ${label}` : undefined}
+      style={{
+        background: pillBg, border: pillBd, borderRadius: 5,
+        padding: '5px 7px', cursor: isClickable ? 'pointer' : 'default',
+        transition: 'opacity 0.15s',
+      }}
+    >
+      <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:3 }}>
+        {loading
+          ? <div style={{ width:7, height:7, borderRadius:'50%', border:`1.5px solid ${pillCol}`, borderTopColor:'transparent', flexShrink:0, animation:'spin 0.7s linear infinite' }}/>
+          : <div style={{ width:4, height:4, borderRadius:'50%', background:pillCol, flexShrink:0 }}/>
+        }
+        <div style={{ fontSize:7.5, color:dark?'rgba(154,152,144,0.75)':C.txLight, fontFamily:SANS, textTransform:'uppercase', letterSpacing:'0.06em', lineHeight:1 }}>{label}</div>
+      </div>
+      <div style={{ fontSize:10, fontWeight:500, color:pillCol, fontFamily:MONO, lineHeight:1.3, wordBreak:'break-word' }}>
+        {loading ? 'fetching…'
+          : (!sig.value || sig.value === '--' || sig.value === 'No data')
+            ? 'no data, tap to retry'
+            : sig.value}
+      </div>
+    </div>
+  );
+}
+ 
+function SkeletonCard() {
+  const b = (w,h,x={}) => <div style={{ width:w, height:h, borderRadius:2, background:'rgba(255,255,255,0.06)', animation:'shimmer 1.8s ease-in-out infinite', ...x }}/>;
+  return (
+    <div style={{ background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:'3px solid rgba(184,160,112,0.35)', borderRadius:2, padding:'24px 22px', display:'flex', flexDirection:'column', height:'100%' }}>
+      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:14 }}>
+        <div style={{ flex:1 }}>{b(80,9,{marginBottom:8})}{b(140,26,{marginBottom:6})}{b(160,11)}</div>
+        <div>{b(56,26,{marginBottom:8})}{b(60,9)}</div>
+      </div>
+      {b(130,18,{marginBottom:14})}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
+        {[0,1,2,3,4,5].map(i=><div key={i} style={{ height:52, borderRadius:4, background:'rgba(255,255,255,0.04)', animation:'shimmer 1.8s ease-in-out infinite', animationDelay:`${i*0.08}s` }}/>)}
+      </div>
+      <div style={{ flex:1 }}>{b('100%',44)}</div>
+    </div>
+  );
+}
+ 
+function FeatureCard({ stock, rank, onSignalRetry }) {
+  if (!stock) return <SkeletonCard/>;
+  const sc     = Math.min(stock.score || 0, 6);
+  const rating = getRating(sc);
+  const chgPos = stock.change?.startsWith('+');
+  const sc_col = scoreColor(sc, true);
+  const exchange = stock.exchange || (US_SET.has(stock.ticker) ? 'NYSE' : 'INTL');
+ 
+  return (
+    <div style={{ background:C.deepBg, border:`1px solid ${C.accent}`, borderTop:`3px solid ${C.gold}`, borderRadius:2, padding:'24px 22px', position:'relative', animation:'fadeUp 0.4s ease both', display:'flex', flexDirection:'column', height:'100%' }}>
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16 }}>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.15em', textTransform:'uppercase', marginBottom:6 }}>
+            Rank {RANK_LABELS[rank-1]}
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:5, flexWrap:'wrap' }}>
+            <span style={{ fontSize:26, fontWeight:700, fontFamily:FONTS, color:'#F1EFE8', letterSpacing:'0.02em' }}>{stock.ticker}</span>
+            <span style={{ fontSize:9, fontFamily:SANS, padding:'2px 6px', borderRadius:2, letterSpacing:'0.08em', background:'rgba(184,160,112,0.15)', color:C.gold, border:'0.5px solid rgba(184,160,112,0.3)', flexShrink:0 }}>
+              {exchange}
+            </span>
+            <span style={{ fontSize:8, fontFamily:SANS, fontWeight:600, padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em', textTransform:'uppercase', background:rating.bg, color:rating.color, border:`0.5px solid ${rating.border}`, flexShrink:0 }}>
+              {rating.label}
+            </span>
+          </div>
+          <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company||''}</div>
+        </div>
+        <div style={{ textAlign:'right', flexShrink:0, marginLeft:12 }}>
+          <div style={{ fontSize:26, fontWeight:400, fontFamily:MONO, color:sc_col, lineHeight:1 }}>
+            {sc}<span style={{ color:'rgba(154,152,144,0.5)' }}>/6</span>
+          </div>
+          <div style={{ marginTop:6, display:'flex', justifyContent:'flex-end' }}>
+            <ScoreDots score={sc} dark/>
+          </div>
+        </div>
+      </div>
+      <div style={{ marginBottom:14 }}>
+        <span style={{ fontSize:18, fontFamily:MONO, fontWeight:400, color:'#F1EFE8' }}>{stock.price||'--'}</span>
+        {stock.change && <span style={{ fontSize:12, marginLeft:8, color:chgPos?'#80C080':C.red, fontFamily:MONO }}>{stock.change}</span>}
+        {stock.marketCap && <span style={{ fontSize:11, marginLeft:8, color:C.txLight, fontFamily:SANS }}>{stock.marketCap}</span>}
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:5, marginBottom:14 }}>
+        {SIG_LABELS.map((label,i) => {
+          const sig = (stock.signals||[])[i]||{};
+          return (
+            <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label} dark
+              signalIndex={i} loading={sig._loading || false}
+              onRetry={onSignalRetry ? (idx) => onSignalRetry(stock.ticker, idx) : undefined}
+            />
+          );
+        })}
+      </div>
+      <div style={{ flex:1, minHeight:44, padding:'10px 12px', background:'rgba(241,239,232,0.04)', borderRadius:2, border:'0.5px solid rgba(184,160,112,0.2)' }}>
+        <span style={{ fontSize:11, color:C.txLight, fontFamily:SANS, lineHeight:1.55 }}>{stock.summary||''}</span>
+      </div>
+      <div style={{ position:'absolute', top:14, right:18, fontSize:9, color:'rgba(154,152,144,0.5)', fontFamily:MONO }}>
+        {stock.updatedAt ? new Date(stock.updatedAt).toLocaleTimeString() : ''}
+      </div>
+    </div>
+  );
+}
+ 
+// ── Carousel Arrow — rendered OUTSIDE the grid, no space stolen from cards ───
+function ArrowBtn({ dir, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={dir === 'left' ? 'Previous picks' : 'Next picks'}
+      style={{
+        width: 40, height: 40,
+        borderRadius: '50%',
+        background: disabled ? 'rgba(58,56,50,0.5)' : C.deepBg,
+        border: `1px solid ${disabled ? 'rgba(184,160,112,0.15)' : C.gold}`,
+        color: disabled ? 'rgba(184,160,112,0.2)' : C.gold,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        transition: 'border-color 0.2s, color 0.2s, background 0.2s',
+        padding: 0,
+        flexShrink: 0,
+      }}
+    >
+      {dir === 'left'
+        ? <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>
+        : <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>
       }
-    } else if (d.curPE&&d.curPE>0) s2={status:'neutral',value:`PE ${d.curPE.toFixed(1)}x`};
-  } catch(_){}
- 
-  // S3 — price vs 50d MA
-  let s3={status:'neutral',value:'No data'};
-  try {
-    if (d.ma50&&d.ma50>0&&curPx){const pct=((curPx-d.ma50)/d.ma50*100).toFixed(1);s3=curPx<=d.ma50?{status:'pass',value:`$${curPx.toFixed(2)} ≤ MA $${d.ma50.toFixed(2)} (${pct}%)`}:{status:'fail',value:`$${curPx.toFixed(2)} > MA $${d.ma50.toFixed(2)} (+${pct}%)`};}
-  } catch(_){}
- 
-  // S4 — insider
-  const {buys,sells,source}=d.insiderData||{buys:[],sells:[],source:null};
-  const s4=buildInsider(buys,sells,source);
- 
-  // S5 — analyst target
-  let s5={status:'neutral',value:'No data'};
-  try {
-    const tgt=d.analystTarget;
-    if (tgt&&tgt>0&&curPx){const up=((tgt-curPx)/curPx*100).toFixed(1);s5=parseFloat(up)>=25?{status:'pass',value:`Target $${tgt.toFixed(2)}, +${up}% upside`}:{status:'fail',value:`Target $${tgt.toFixed(2)}, +${up}% upside`};}
-  } catch(_){}
- 
-  // S6 — PE vs peers: display % above/below, not just the raw peer avg
-  let s6={status:'neutral',value:'No data'};
-  try {
-    const pp=d.peerPE;
-    if (pp&&pp.avgPE&&pp.diff!==null) {
-      const absDiff=Math.abs(pp.diff);
-      if      (pp.diff<-8) s6={status:'pass',   value:`${absDiff.toFixed(0)}% < peer avg ${pp.avgPE}x`};
-      else if (pp.diff>8)  s6={status:'fail',   value:`${absDiff.toFixed(0)}% > peer avg ${pp.avgPE}x`};
-      else                 s6={status:'neutral', value:`In line with peers (avg ${pp.avgPE}x)`};
-    } else if (pp?.avgPE) {
-      s6={status:'neutral',value:`Peer avg ${pp.avgPE}x`};
-    }
-  } catch(_){}
- 
-  const signals=[s1,s2,s3,s4,s5,s6];
-  const score=signals.filter(s=>s.status==='pass').length;
-  const NAMES=['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside','PE vs peers'];
-  const passes=signals.map((s,i)=>s.status==='pass'?NAMES[i]:null).filter(Boolean);
-  const fails =signals.map((s,i)=>s.status==='fail'?NAMES[i]:null).filter(Boolean);
-  let summary;
-  if      (score>=5) summary=`Strong value candidate — ${score}/6 signals pass. Strengths: ${passes.join(', ')}.`;
-  else if (score===4)summary=`Good signals (4/6). Passes: ${passes.join(', ')}.`;
-  else if (score===3)summary=`Moderate signals (3/6). Passes: ${passes.join(', ')}.`;
-  else if (score>0)  summary=`Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
-  else               summary=`No signals pass. Fails: ${fails.join(', ')}.`;
- 
-  return{ticker,company,exchange,price:`$${curPx.toFixed(2)}`,
-    change:q.dp!=null?`${q.dp>0?'+':''}${q.dp.toFixed(2)}%`:null,
-    marketCap:mcs,score,signals,summary,rating:getRating(score),
-    peerPE:d.peerPE||null,updatedAt:new Date().toISOString()};
+    </button>
+  );
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// Handler
-// ─────────────────────────────────────────────────────────────────────────────
-export default async function handler(req, res) {
-  if (req.method!=='POST') return res.status(405).json({error:'Method not allowed'});
-  if (!FINNHUB_KEY)        return res.status(500).json({error:'FINNHUB_KEY not set'});
-  const {tickers}=req.body;
-  if (!Array.isArray(tickers)||tickers.length===0) return res.status(400).json({error:'tickers array required'});
-  const cleaned=tickers.slice(0,20).map(t=>t.toUpperCase().trim());
-  Object.keys(_avCache).forEach(k=>delete _avCache[k]);
-  Object.keys(_saCache).forEach(k=>delete _saCache[k]);
-  Object.keys(_mwCache).forEach(k=>delete _mwCache[k]);
-  Object.keys(_pePeerCache).forEach(k=>delete _pePeerCache[k]);
-  const crumbInfo=await getYahooCrumb();
-  const results={};
-  await Promise.allSettled(cleaned.map(async ticker=>{
-    try { const raw=await fetchStockData(ticker,crumbInfo); const ev=evaluate(ticker,raw); results[ticker]=ev||{ticker,error:'No quote data'}; }
-    catch(e){ results[ticker]={ticker,error:e.message}; }
-  }));
-  res.setHeader('Cache-Control','s-maxage=300, stale-while-revalidate');
-  return res.status(200).json({results,fetchedAt:new Date().toISOString()});
+function PageDots({ total, active, onChange }) {
+  return (
+    <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+      {Array.from({ length: total }).map((_, i) => (
+        <button
+          key={i}
+          onClick={() => onChange(i)}
+          aria-label={`Page ${i+1}`}
+          style={{
+            width: i === active ? 20 : 6, height: 6, borderRadius: 3,
+            background: i === active ? C.gold : 'rgba(184,160,112,0.3)',
+            border: 'none', padding: 0, cursor: 'pointer',
+            transition: 'all 0.25s ease',
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+ 
+function ResultCard({ stock, rank, onSignalRetry }) {
+  const sc     = Math.min(stock.score||0, 6);
+  const rating = getRating(sc);
+  const chgPos = stock.change?.startsWith('+');
+  const sc_col = scoreColor(sc, false);
+  const accentL = sc>=5?C.gold : sc>=4?C.greenBd : sc>=3?C.amberBd : C.borderDk;
+  const rnk = rank===1?{bg:C.gold,color:'#2C2C2A'} : rank===2?{bg:C.accent,color:'#F1EFE8'} : rank===3?{bg:C.accentDk,color:'#F1EFE8'} : {bg:C.border,color:C.txMid};
+ 
+  return (
+    <div style={{ background:C.cardBg, borderRadius:2, border:`0.5px solid ${C.borderDk}`, borderLeft:`3px solid ${accentL}`, padding:'14px 16px' }}>
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:10, marginBottom:10 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <div style={{ width:26, height:26, borderRadius:2, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:600, fontFamily:MONO, flexShrink:0, background:rnk.bg, color:rnk.color }}>{rank}</div>
+          <div>
+            <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+              <span style={{ fontSize:16, fontWeight:700, fontFamily:FONTS, letterSpacing:'0.02em', color:C.tx }}>{stock.ticker}</span>
+              <span style={{ fontSize:8, fontFamily:SANS, padding:'2px 5px', borderRadius:2, letterSpacing:'0.06em', background:C.darkBg, color:'#F1EFE8' }}>
+                {stock.exchange||(US_SET.has(stock.ticker)?'NYSE':'INTL')}
+              </span>
+              <span style={{ fontSize:9, fontFamily:SANS, fontWeight:600, padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em', textTransform:'uppercase', background:rating.bg, color:rating.color, border:`0.5px solid ${rating.border}` }}>
+                {rating.label}
+              </span>
+            </div>
+            <div style={{ fontSize:11, color:C.txMid, marginTop:2, fontFamily:SANS }}>{stock.company||''}</div>
+            {stock.price && (
+              <div style={{ fontSize:11, color:C.txMid, fontFamily:MONO, marginTop:2 }}>
+                {stock.price}
+                {stock.change && <span style={{ marginLeft:6, color:chgPos?C.green:C.red }}>{stock.change}</span>}
+                {stock.marketCap && <span style={{ marginLeft:6, color:C.txLight }}>{stock.marketCap}</span>}
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{ textAlign:'right', flexShrink:0, display:'flex', flexDirection:'column', alignItems:'flex-end', gap:8 }}>
+          <div style={{ fontSize:22, fontWeight:400, fontFamily:MONO, color:sc_col, lineHeight:1 }}>
+            {sc}<span style={{ color:C.txLight }}>/6</span>
+          </div>
+          <ScoreDots score={sc}/>
+        </div>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:4, marginBottom:8 }}>
+        {SIG_LABELS.map((label,i) => {
+          const sig = (stock.signals||[])[i]||{};
+          return (
+            <SigPill key={i} sig={{ status:sig.status, value:sig.value }} label={label}
+              signalIndex={i} loading={sig._loading || false}
+              onRetry={onSignalRetry ? (idx) => onSignalRetry(stock.ticker, idx) : undefined}
+            />
+          );
+        })}
+      </div>
+      {stock.summary && (
+        <div style={{ fontSize:11, color:C.txMid, borderTop:`0.5px solid ${C.border}`, paddingTop:8, lineHeight:1.55, fontFamily:SANS }}>
+          {stock.summary}
+          <span style={{ marginLeft:8, fontSize:9, color:C.txLight, fontFamily:MONO }}>· {stock.updatedAt?new Date(stock.updatedAt).toLocaleTimeString():''}</span>
+        </div>
+      )}
+      {stock.error && (
+        <div style={{ fontSize:11, color:C.red, borderTop:`0.5px solid ${C.border}`, paddingTop:8, fontFamily:SANS }}>Error: {stock.error}</div>
+      )}
+    </div>
+  );
+}
+ 
+export default function Home() {
+  const [input,setInput]               = useState('');
+  const [results,setResults]           = useState([]);
+  const [scanning,setScanning]         = useState(false);
+  const [status,setStatus]             = useState('');
+  const [filter,setFilter]             = useState('all');
+  const [updatedAt,setUpdatedAt]       = useState('');
+  const [activePreset,setActivePreset] = useState('');
+  const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
+  const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
+  const [carouselPage,setCarouselPage] = useState(0);
+  const [carouselDir,setCarouselDir]   = useState(1);
+  const [transitioning,setTransitioning] = useState(false);
+  // animPhase: 'idle' | 'exit' | 'enter'
+  const [animPhase,setAnimPhase]         = useState('idle');
+  const nextPageRef = useRef(0);
+ 
+  const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
+  const timerRef=useRef(null), tickersRef=useRef([]);
+  const goToPage = useCallback((nextPage, dir = 1) => {
+    if (transitioning || nextPage === carouselPage) return;
+    setCarouselDir(dir);
+    setTransitioning(true);
+    setAnimPhase('exit');
+    setTimeout(() => {
+      setCarouselPage(nextPage);
+      setAnimPhase('enter');
+      setTimeout(() => { setAnimPhase('idle'); setTransitioning(false); }, 150);
+    }, 100);
+  }, [transitioning, carouselPage]);
+ 
+  const prevPage = useCallback(() => { if (carouselPage > 0) goToPage(carouselPage - 1, -1); }, [carouselPage, goToPage]);
+  const nextPage = useCallback(() => { if (carouselPage < totalPages - 1) goToPage(carouselPage + 1, 1); }, [carouselPage, totalPages, goToPage]);
+ 
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.key === 'ArrowRight') nextPage();
+      if (e.key === 'ArrowLeft')  prevPage();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [nextPage, prevPage]);
+ 
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const sr = await fetch('/api/top3');
+        if (!live||!sr.ok) { if(live) setTopStatus('Could not load top picks'); return; }
+        const { candidates, totalScanned, stockMeta = {} } = await sr.json();
+        if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
+        setTopStatus(`Analysing top ${candidates.length} picks…`);
+        const ar = await fetch('/api/analyse', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ tickers: candidates }),
+        });
+        if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
+        const { results:res } = await ar.json();
+        if (!live) return;
+        const merged = Object.fromEntries(
+          Object.entries(res||{}).map(([ticker, stock]) => {
+            if (!stock) return [ticker, stock];
+            const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
+              ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
+            return [ticker, { ...stock, exchange }];
+          })
+        );
+        const sorted = Object.values(merged)
+          .filter(s => s && !s.error && s.score != null)
+          .sort((a, b) => (b.score||0) - (a.score||0))
+          .slice(0, TOTAL_PICKS);
+        const picks = Array(TOTAL_PICKS).fill(null).map((_, i) => sorted[i] || null);
+        setTopPicks(picks);
+        setTopStatus(`${totalScanned||candidates.length} securities screened`);
+      } catch(_) { if(live) setTopStatus('Could not load top picks'); }
+    })();
+    return () => { live = false; };
+  }, []);
+ 
+  const retrySignal = useCallback(async (ticker, signalIndex, isTopPick) => {
+    const setState = isTopPick ? setTopPicks : setResults;
+    setState(prev => prev.map(stock => {
+      if (!stock || stock.ticker !== ticker) return stock;
+      const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
+      signals[signalIndex] = { ...(signals[signalIndex] || {}), _loading: true };
+      return { ...stock, signals };
+    }));
+    try {
+      const res  = await fetch('/api/analyse', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tickers: [ticker] }),
+      });
+      const data   = await res.json();
+      const fresh  = data?.results?.[ticker];
+      let newSig   = fresh?.signals?.[signalIndex] || { status:'neutral', value:'No data' };
+      if (signalIndex === 3 && (!newSig.value || newSig.value === 'No data' || newSig.value === 'No activity (30d)')) {
+        newSig = { status:'neutral', value:'No recent insider transactions' };
+      }
+      setState(prev => prev.map(stock => {
+        if (!stock || stock.ticker !== ticker) return stock;
+        const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
+        signals[signalIndex] = { ...newSig, _loading: false };
+        const score = signals.filter(s => s.status === 'pass').length;
+        return { ...stock, signals, score };
+      }));
+    } catch (_) {
+      setState(prev => prev.map(stock => {
+        if (!stock || stock.ticker !== ticker) return stock;
+        const signals = [...(stock.signals || [])];
+        if (signals[signalIndex]) signals[signalIndex] = { ...signals[signalIndex], _loading: false };
+        return { ...stock, signals };
+      }));
+    }
+  }, []);
+ 
+  const retryTopSignal    = useCallback((ticker, idx) => retrySignal(ticker, idx, true),  [retrySignal]);
+  const retryResultSignal = useCallback((ticker, idx) => retrySignal(ticker, idx, false), [retrySignal]);
+ 
+  const scan = useCallback(async (tickers) => {
+    setScanning(true); setStatus(`Analysing ${tickers.length} securities…`);
+    try {
+      const res = await fetch('/api/analyse', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tickers}) });
+      if (!res.ok) { const e=await res.json(); throw new Error(e.error||`HTTP ${res.status}`); }
+      const data = await res.json();
+      const arr  = Object.values(data.results).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
+      setResults(arr); setUpdatedAt(new Date().toLocaleTimeString()); setStatus('');
+    } catch(e) { setStatus(`Error: ${e.message}`); }
+    finally { setScanning(false); }
+  }, []);
+ 
+  function runScan() {
+    const tickers = input.split(/[\s,;]+/).map(t=>t.toUpperCase().trim()).filter(Boolean).slice(0,20);
+    if (!tickers.length) return;
+    tickersRef.current = tickers; clearInterval(timerRef.current); setResults([]);
+    scan(tickers);
+    timerRef.current = setInterval(() => scan(tickersRef.current), 5*60*1000);
+  }
+  useEffect(() => () => clearInterval(timerRef.current), []);
+ 
+  const filtered = results.filter(r => {
+    if (filter==='strong') return (r.score||0)>=5;
+    if (filter==='mod')    return (r.score||0)===3||(r.score||0)===4;
+    if (filter==='weak')   return (r.score||0)<=2;
+    if (filter==='us')     return US_SET.has(r.ticker);
+    if (filter==='intl')   return !US_SET.has(r.ticker);
+    return true;
+  });
+ 
+  const pageStart    = carouselPage * PAGE_SIZE;
+  const currentCards = [...topPicks.slice(pageStart, pageStart + PAGE_SIZE)];
+  while (currentCards.length < PAGE_SIZE) currentCards.push(null);
+ 
+  return (
+    <>
+      <Head>
+        <title>Signal Engine</title>
+        <meta name="description" content="Institutional-grade equity value scanner"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet"/>
+        <style>{`
+          *{box-sizing:border-box;margin:0;padding:0;}
+          html{-webkit-font-smoothing:antialiased;}
+          body{background:${C.pageBg};}
+          ::selection{background:${C.gold};color:#2C2C2A;}
+          input::placeholder{color:${C.txLight};}
+          input:focus{outline:none;}
+          button{cursor:pointer;transition:opacity 0.14s,all 0.2s;}
+          button:not(:disabled):hover{opacity:0.76;}
+          button:disabled{opacity:0.38;cursor:not-allowed;}
+          @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+          @keyframes shimmer{0%,100%{opacity:0.5}50%{opacity:0.85}}
+          @keyframes spin{to{transform:rotate(360deg)}}
+        `}</style>
+      </Head>
+ 
+      <div style={{ background:C.pageBg, minHeight:'100vh', color:C.tx, fontFamily:SANS }}>
+ 
+        {/* ── Header ── */}
+        <div style={{ background:C.deepBg, borderBottom:'1px solid rgba(184,160,112,0.3)', padding:'0 32px' }}>
+          <div style={{ maxWidth:1200, margin:'0 auto', display:'flex', alignItems:'center', justifyContent:'space-between', height:64 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:16 }}>
+              <div style={{ width:32, height:32, border:`1px solid ${C.gold}`, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill={C.gold}><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
+              </div>
+              <div>
+                <div style={{ fontSize:18, fontFamily:FONTS, fontWeight:600, color:'#F1EFE8', letterSpacing:'0.08em' }}>SIGNAL ENGINE</div>
+                <div style={{ fontSize:9, color:C.gold, fontFamily:SANS, letterSpacing:'0.18em', textTransform:'uppercase', marginTop:1 }}>Equity Undervalue Scanner</div>
+              </div>
+            </div>
+            <div style={{ textAlign:'right', fontSize:10, color:C.txLight, fontFamily:MONO, lineHeight:1.8 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:6, justifyContent:'flex-end' }}>
+                <div style={{ width:6, height:6, borderRadius:'50%', background:scanning?C.gold:results.length?C.gold:C.txLight }}/>
+                <span style={{ color:'#F1EFE8' }}>{scanning?'Scanning…':results.length?'Live':'Ready'}</span>
+              </div>
+              {updatedAt && <div>Updated {updatedAt}</div>}
+            </div>
+          </div>
+        </div>
+ 
+        <div style={{ maxWidth:1200, margin:'0 auto', padding:'32px 32px 80px' }}>
+ 
+          {/* ── Top Picks ── */}
+          <div style={{ marginBottom:16 }}>
+            <div style={{ display:'flex', alignItems:'baseline', gap:16, marginBottom:20 }}>
+              <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em' }}>Top Picks Today</h2>
+              <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
+              <div style={{ fontSize:9.5, color:C.txLight, fontFamily:SANS, letterSpacing:'0.1em', textTransform:'uppercase', whiteSpace:'nowrap' }}>{topStatus}</div>
+            </div>
+ 
+            {/*
+              Arrows are position:absolute, centred vertically on the card area.
+              Cards use opacity + translateX CSS transitions — no key remount so
+              there is zero flash when switching pages.
+            */}
+            <div style={{ position:'relative' }}>
+              {/* Left arrow — 20px outside the card grid */}
+              <div style={{ position:'absolute', left:-20, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+                <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage === 0} />
+              </div>
+ 
+              {/* Cards — pure opacity fade, no translate so cards never shimmy */}
+              <div
+                style={{
+                  display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16,
+                  opacity:    animPhase === 'exit' ? 0 : 1,
+                  transition: animPhase === 'exit'
+                    ? 'opacity 0.1s ease'
+                    : 'opacity 0.15s ease',
+                  willChange: 'opacity',
+                }}
+              >
+                {currentCards.map((stock, i) => {
+                  const globalRank = pageStart + i + 1;
+                  return (
+                    <FeatureCard
+                      key={stock ? stock.ticker : `skeleton-${globalRank}`}
+                      stock={stock}
+                      rank={globalRank}
+                      onSignalRetry={retryTopSignal}
+                    />
+                  );
+                })}
+              </div>
+ 
+              {/* Right arrow — 20px outside the card grid */}
+              <div style={{ position:'absolute', right:-20, top:'50%', transform:'translateY(-50%)', zIndex:10 }}>
+                <ArrowBtn dir="right" onClick={nextPage} disabled={carouselPage === totalPages - 1} />
+              </div>
+            </div>
+ 
+            {/* Page dots + counter — tighter top margin */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:16, marginTop:14 }}>
+              <PageDots total={totalPages} active={carouselPage} onChange={(p) => goToPage(p, p > carouselPage ? 1 : -1)} />
+              <span style={{ fontSize:9, color:C.txLight, fontFamily:MONO, letterSpacing:'0.1em' }}>
+                {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, TOTAL_PICKS)} of {TOTAL_PICKS}
+              </span>
+            </div>
+          </div>
+ 
+          {/* ── Custom Scan ── */}
+          <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:20 }}>
+            <h2 style={{ fontSize:36, fontFamily:FONTS, fontWeight:600, color:C.tx, letterSpacing:'0.02em', whiteSpace:'nowrap' }}>Custom Scan</h2>
+            <div style={{ height:'0.5px', flex:1, background:C.borderDk }}/>
+          </div>
+ 
+          <div style={{ background:C.cardBg, border:`0.5px solid ${C.borderDk}`, padding:'20px', marginBottom:20 }}>
+            <div style={{ display:'flex', gap:10, marginBottom:14 }}>
+              <input type="text" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&runScan()}
+                placeholder="Enter ticker symbols: AAPL, MSFT, NVDA, TSM…"
+                style={{ flex:1, background:C.pageBg, border:`0.5px solid ${C.borderDk}`, padding:'10px 14px', fontSize:13, fontFamily:MONO, color:C.tx, borderRadius:0 }}/>
+              <button onClick={runScan} disabled={scanning} style={{ padding:'10px 24px', background:C.darkBg, color:'#F1EFE8', border:'none', fontSize:12, fontFamily:SANS, fontWeight:500, letterSpacing:'0.1em', textTransform:'uppercase' }}>
+                {scanning ? 'Scanning…' : 'Scan'}
+              </button>
+              {results.length > 0 && <>
+                <button onClick={()=>scan(tickersRef.current)} disabled={scanning} style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS }}>Refresh</button>
+                <button onClick={()=>{setResults([]);tickersRef.current=[];setUpdatedAt('');}} style={{ padding:'10px 16px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:12, fontFamily:SANS }}>Clear</button>
+              </>}
+            </div>
+            <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
+              <span style={{ fontSize:9, color:C.txLight, fontFamily:SANS, letterSpacing:'0.12em', textTransform:'uppercase', marginRight:4 }}>Sectors</span>
+              {Object.keys(PRESETS).map(name => {
+                const active = activePreset === name;
+                return <button key={name} onClick={()=>{setInput(PRESETS[name]);setActivePreset(name);}} style={{ padding:'4px 12px', fontSize:10, fontFamily:SANS, letterSpacing:'0.06em', background:active?C.darkBg:'transparent', color:active?'#F1EFE8':C.txMid, border:`0.5px solid ${active?C.darkBg:C.borderDk}`, borderRadius:0, whiteSpace:'nowrap' }}>{name}</button>;
+              })}
+            </div>
+          </div>
+ 
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center', marginBottom:16 }}>
+            <span style={{ fontSize:9, color:C.txLight, fontFamily:SANS, letterSpacing:'0.12em', textTransform:'uppercase', marginRight:4 }}>Filter</span>
+            {[['all','All'],['strong','Strong 5–6'],['mod','Moderate 3–4'],['weak','Weak 0–2'],['us','US'],['intl','International']].map(([k,l]) => {
+              const active = filter===k;
+              return <button key={k} onClick={()=>setFilter(k)} style={{ padding:'4px 12px', fontSize:10, fontFamily:SANS, letterSpacing:'0.06em', background:active?C.accentDk:'transparent', color:active?'#F1EFE8':C.txMid, border:`0.5px solid ${active?C.accentDk:C.borderDk}`, borderRadius:0 }}>{l}</button>;
+            })}
+          </div>
+ 
+          {scanning && (
+            <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:11, color:C.txMid, fontFamily:MONO, marginBottom:12 }}>
+              <div style={{ width:11, height:11, border:`1.5px solid ${C.border}`, borderTopColor:C.gold, borderRadius:'50%', flexShrink:0, animation:'spin 0.7s linear infinite' }}/>{status}
+            </div>
+          )}
+          {!scanning && status && <div style={{ fontSize:11, color:C.red, fontFamily:MONO, marginBottom:12 }}>{status}</div>}
+ 
+          {filtered.length === 0 && !scanning ? (
+            <div style={{ textAlign:'center', padding:'48px 16px', color:C.txLight, fontFamily:FONTS, fontSize:18, fontStyle:'italic', fontWeight:300 }}>
+              {results.length > 0 ? 'No results match this filter.' : 'Select a sector or enter tickers above to begin scanning.'}
+            </div>
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+              {filtered.map((stock,i) => <ResultCard key={stock.ticker} stock={stock} rank={i+1} onSignalRetry={retryResultSignal}/>)}
+            </div>
+          )}
+ 
+          {results.length > 0 && (
+            <div style={{ display:'flex', gap:8, marginTop:24, paddingTop:20, borderTop:`0.5px solid ${C.borderDk}`, flexWrap:'wrap', alignItems:'center' }}>
+              <span style={{ fontSize:10, color:C.txLight, fontFamily:MONO, flex:1, letterSpacing:'0.06em' }}>{filtered.length} securities ready to export</span>
+              <button onClick={() => {
+                const hdr = ['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs50dMA','Insider','Analyst','% vs Peers','Summary'];
+                const rows = filtered.map((r,i) => { const g=r.signals||[]; return [i+1,r.ticker,`"${(r.company||'').replace(/"/g,'""')}"`,r.score||0,r.price||'',r.change||'',r.marketCap||'',g[0]?.value||'',g[1]?.value||'',g[2]?.value||'',g[3]?.value||'',g[4]?.value||'',g[5]?.value||'',`"${(r.summary||'').replace(/"/g,'""')}"`].join(','); });
+                const blob = new Blob([[hdr.join(',')].concat(rows).join('\n')],{type:'text/csv'});
+                const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`signals_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+              }} style={{ padding:'8px 18px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:11, fontFamily:SANS, letterSpacing:'0.06em' }}>Export CSV</button>
+              <button onClick={() => {
+                const blob = new Blob([JSON.stringify(filtered.map((r,i)=>({rank:i+1,...r})),null,2)],{type:'application/json'});
+                const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`signals_${new Date().toISOString().slice(0,10)}.json`; a.click();
+              }} style={{ padding:'8px 18px', background:'transparent', color:C.txMid, border:`0.5px solid ${C.borderDk}`, fontSize:11, fontFamily:SANS, letterSpacing:'0.06em' }}>Export JSON</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
 }
  
