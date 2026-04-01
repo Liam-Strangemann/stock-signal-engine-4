@@ -37,42 +37,25 @@ const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
 const PAGE_SIZE   = 3;
 const TOTAL_PICKS = 9;
  
-// ─────────────────────────────────────────────────────────────────────────────
-// Score colour system — three distinct greens for 4/5/6
-//
-//   0–2  → muted grey/bronze
-//   3    → amber  (watch)
-//   4    → sage green  (lightest)
-//   5    → mid green
-//   6    → deep forest green (strongest signal)
-//
-// dark=true variants are used on the dark card background (top picks).
-// ─────────────────────────────────────────────────────────────────────────────
 function scoreColor(sc, dark = false) {
-  if (sc >= 6) return dark ? '#7EC87A' : '#2D6E2A';   // deep forest green
-  if (sc === 5) return dark ? '#9DD88A' : '#3D8A38';  // mid green
-  if (sc === 4) return dark ? '#B8E0A0' : '#5A9A50';  // sage / light green
-  if (sc === 3) return dark ? '#C8A870' : C.amber;    // amber
-  return dark ? 'rgba(154,152,144,0.55)' : C.txLight; // muted
+  if (sc >= 6) return dark ? '#7EC87A' : '#2D6E2A';
+  if (sc === 5) return dark ? '#9DD88A' : '#3D8A38';
+  if (sc === 4) return dark ? '#B8E0A0' : '#5A9A50';
+  if (sc === 3) return dark ? '#C8A870' : C.amber;
+  return dark ? 'rgba(154,152,144,0.55)' : C.txLight;
 }
  
-// Rating badge — 4/5/6 are now all distinct greens
 function getRating(sc) {
-  if (sc >= 6) return { label:'Strong Buy', color:'#14532d', bg:'#bbf7d0', border:'#6ee7a0' }; // deep green
-  if (sc === 5) return { label:'Strong Buy', color:'#166534', bg:'#dcfce7', border:'#86efac' }; // mid green
-  if (sc === 4) return { label:'Buy',        color:'#3A7A35', bg:'#E4F2DE', border:'#A8CCA0' }; // sage green
-  if (sc === 3) return { label:'Watch',      color:'#7A6030', bg:'#F0E8D0', border:'#C8A870' }; // amber
+  if (sc >= 6) return { label:'Strong Buy', color:'#14532d', bg:'#bbf7d0', border:'#6ee7a0' };
+  if (sc === 5) return { label:'Strong Buy', color:'#166534', bg:'#dcfce7', border:'#86efac' };
+  if (sc === 4) return { label:'Buy',        color:'#3A7A35', bg:'#E4F2DE', border:'#A8CCA0' };
+  if (sc === 3) return { label:'Watch',      color:'#7A6030', bg:'#F0E8D0', border:'#C8A870' };
   return               { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
  
-// ─────────────────────────────────────────────────────────────────────────────
-// ScoreDots — every filled dot uses the SAME colour as the card's score colour.
-// No more per-position colour variation: all filled dots = scoreColor(score).
-// ─────────────────────────────────────────────────────────────────────────────
 function ScoreDots({ score, max = 6, dark = false }) {
   const filledColor = scoreColor(score, dark);
   const emptyRing   = dark ? 'rgba(95,94,86,0.45)' : C.borderDk;
- 
   return (
     <div style={{ display: 'flex', gap: 4 }}>
       {Array.from({ length: max }).map((_, i) => {
@@ -155,6 +138,21 @@ function SkeletonCard() {
   );
 }
  
+// ── Source badge shown on top pick cards that came from a custom scan ──────────
+function SourceBadge({ source }) {
+  if (!source) return null;
+  return (
+    <span style={{
+      fontSize: 7.5, fontFamily: SANS, padding: '1px 5px', borderRadius: 2,
+      letterSpacing: '0.1em', textTransform: 'uppercase',
+      background: 'rgba(184,160,112,0.12)', color: C.gold,
+      border: '0.5px dashed rgba(184,160,112,0.4)', flexShrink: 0,
+    }}>
+      {source === 'custom' ? 'custom scan' : 'auto'}
+    </span>
+  );
+}
+ 
 function FeatureCard({ stock, rank, onSignalRetry }) {
   if (!stock) return <SkeletonCard/>;
   const sc     = Math.min(stock.score || 0, 6);
@@ -178,6 +176,7 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
             <span style={{ fontSize:8, fontFamily:SANS, fontWeight:600, padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em', textTransform:'uppercase', background:rating.bg, color:rating.color, border:`0.5px solid ${rating.border}`, flexShrink:0 }}>
               {rating.label}
             </span>
+            <SourceBadge source={stock._source} />
           </div>
           <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company||''}</div>
         </div>
@@ -216,7 +215,6 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
   );
 }
  
-// ── Carousel Arrow ─────────────────────────────────────────────────────────────
 function ArrowBtn({ dir, onClick, disabled }) {
   return (
     <button
@@ -224,16 +222,14 @@ function ArrowBtn({ dir, onClick, disabled }) {
       disabled={disabled}
       aria-label={dir === 'left' ? 'Previous picks' : 'Next picks'}
       style={{
-        width: 40, height: 40,
-        borderRadius: '50%',
+        width: 40, height: 40, borderRadius: '50%',
         background: disabled ? 'rgba(58,56,50,0.5)' : C.deepBg,
         border: `1px solid ${disabled ? 'rgba(184,160,112,0.15)' : C.gold}`,
         color: disabled ? 'rgba(184,160,112,0.2)' : C.gold,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         cursor: disabled ? 'not-allowed' : 'pointer',
         transition: 'border-color 0.2s, color 0.2s, background 0.2s',
-        padding: 0,
-        flexShrink: 0,
+        padding: 0, flexShrink: 0,
       }}
     >
       {dir === 'left'
@@ -328,6 +324,22 @@ function ResultCard({ stock, rank, onSignalRetry }) {
   );
 }
  
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified stock pool helpers
+//
+// allStocksRef  — Map<ticker, stock>  — master pool of every stock ever analysed
+//                 (from auto top-picks scan AND from custom scans)
+// recomputeTopPicks() — re-sorts the pool by score descending, takes top 9,
+//                       and updates the topPicks state array
+//
+// Rules:
+//   • When a stock appears in both auto and custom, keep the most recently
+//     updated version (highest score wins ties).
+//   • After every scan or signal retry, call recomputeTopPicks().
+//   • Stocks coming from a custom scan get _source:'custom' so the UI can
+//     show a small badge distinguishing them from auto-selected picks.
+// ─────────────────────────────────────────────────────────────────────────────
+ 
 export default function Home() {
   const [input,setInput]               = useState('');
   const [results,setResults]           = useState([]);
@@ -342,10 +354,53 @@ export default function Home() {
   const [carouselDir,setCarouselDir]   = useState(1);
   const [transitioning,setTransitioning] = useState(false);
   const [animPhase,setAnimPhase]         = useState('idle');
-  const nextPageRef = useRef(0);
+ 
+  const timerRef      = useRef(null);
+  const tickersRef    = useRef([]);
+  // Master pool: ticker → enriched stock object
+  const allStocksRef  = useRef(new Map());
  
   const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
-  const timerRef=useRef(null), tickersRef=useRef([]);
+ 
+  // ── Recompute top picks from the unified pool ────────────────────────────
+  // Called after every pool mutation. Sorts by score desc, fills 9 slots.
+  const recomputeTopPicks = useCallback(() => {
+    const all = Array.from(allStocksRef.current.values())
+      .filter(s => s && !s.error && s.score != null);
+ 
+    // Sort: score desc, then updatedAt desc as tiebreaker
+    all.sort((a, b) => {
+      const sd = (b.score || 0) - (a.score || 0);
+      if (sd !== 0) return sd;
+      return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+    });
+ 
+    const picks = Array(TOTAL_PICKS).fill(null).map((_, i) => all[i] || null);
+    setTopPicks(picks);
+  }, []);
+ 
+  // ── Merge a batch of freshly analysed stocks into the pool ──────────────
+  // source: 'auto' | 'custom'
+  const mergeIntoPool = useCallback((stockMap, source) => {
+    for (const [ticker, stock] of Object.entries(stockMap)) {
+      if (!stock || stock.error) continue;
+      const existing = allStocksRef.current.get(ticker);
+      // Always take the latest data; prefer higher scores on tie
+      if (!existing || (stock.score ?? 0) >= (existing.score ?? 0)) {
+        allStocksRef.current.set(ticker, { ...stock, _source: source });
+      }
+    }
+    recomputeTopPicks();
+  }, [recomputeTopPicks]);
+ 
+  // ── Update a single stock in the pool (after signal retry) ──────────────
+  const updateStockInPool = useCallback((ticker, updater) => {
+    const existing = allStocksRef.current.get(ticker);
+    if (existing) {
+      allStocksRef.current.set(ticker, updater(existing));
+      recomputeTopPicks();
+    }
+  }, [recomputeTopPicks]);
  
   const goToPage = useCallback((nextPage, dir = 1) => {
     if (transitioning || nextPage === carouselPage) return;
@@ -372,6 +427,7 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handler);
   }, [nextPage, prevPage]);
  
+  // ── Auto top-picks on mount ───────────────────────────────────────────────
   useEffect(() => {
     let live = true;
     (async () => {
@@ -388,6 +444,8 @@ export default function Home() {
         if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
         const { results:res } = await ar.json();
         if (!live) return;
+ 
+        // Merge exchange metadata then push into unified pool
         const merged = Object.fromEntries(
           Object.entries(res||{}).map(([ticker, stock]) => {
             if (!stock) return [ticker, stock];
@@ -396,26 +454,28 @@ export default function Home() {
             return [ticker, { ...stock, exchange }];
           })
         );
-        const sorted = Object.values(merged)
-          .filter(s => s && !s.error && s.score != null)
-          .sort((a, b) => (b.score||0) - (a.score||0))
-          .slice(0, TOTAL_PICKS);
-        const picks = Array(TOTAL_PICKS).fill(null).map((_, i) => sorted[i] || null);
-        setTopPicks(picks);
+        mergeIntoPool(merged, 'auto');
         setTopStatus(`${totalScanned||candidates.length} securities screened`);
       } catch(_) { if(live) setTopStatus('Could not load top picks'); }
     })();
     return () => { live = false; };
-  }, []);
+  }, [mergeIntoPool]);
  
-  const retrySignal = useCallback(async (ticker, signalIndex, isTopPick) => {
-    const setState = isTopPick ? setTopPicks : setResults;
-    setState(prev => prev.map(stock => {
-      if (!stock || stock.ticker !== ticker) return stock;
+  // ── Signal retry — works for both top picks and custom results ─────────
+  const retrySignal = useCallback(async (ticker, signalIndex) => {
+    // Mark loading in pool (which propagates to top picks via recompute)
+    const markLoading = (stock) => {
       const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
       signals[signalIndex] = { ...(signals[signalIndex] || {}), _loading: true };
       return { ...stock, signals };
-    }));
+    };
+ 
+    // Update pool
+    updateStockInPool(ticker, markLoading);
+ 
+    // Also update custom results list directly for instant feedback
+    setResults(prev => prev.map(s => s?.ticker === ticker ? markLoading(s) : s));
+ 
     try {
       const res  = await fetch('/api/analyse', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -427,26 +487,32 @@ export default function Home() {
       if (signalIndex === 3 && (!newSig.value || newSig.value === 'No data' || newSig.value === 'No activity (30d)')) {
         newSig = { status:'neutral', value:'No recent insider transactions' };
       }
-      setState(prev => prev.map(stock => {
-        if (!stock || stock.ticker !== ticker) return stock;
+ 
+      const applyResult = (stock) => {
         const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
         signals[signalIndex] = { ...newSig, _loading: false };
         const score = signals.filter(s => s.status === 'pass').length;
         return { ...stock, signals, score };
-      }));
+      };
+ 
+      // Update pool → triggers recomputeTopPicks which re-sorts
+      updateStockInPool(ticker, applyResult);
+ 
+      // Also refresh custom results list
+      setResults(prev => prev.map(s => s?.ticker === ticker ? applyResult(s) : s));
+ 
     } catch (_) {
-      setState(prev => prev.map(stock => {
-        if (!stock || stock.ticker !== ticker) return stock;
+      const clearLoading = (stock) => {
         const signals = [...(stock.signals || [])];
         if (signals[signalIndex]) signals[signalIndex] = { ...signals[signalIndex], _loading: false };
         return { ...stock, signals };
-      }));
+      };
+      updateStockInPool(ticker, clearLoading);
+      setResults(prev => prev.map(s => s?.ticker === ticker ? clearLoading(s) : s));
     }
-  }, []);
+  }, [updateStockInPool]);
  
-  const retryTopSignal    = useCallback((ticker, idx) => retrySignal(ticker, idx, true),  [retrySignal]);
-  const retryResultSignal = useCallback((ticker, idx) => retrySignal(ticker, idx, false), [retrySignal]);
- 
+  // ── Custom scan ──────────────────────────────────────────────────────────
   const scan = useCallback(async (tickers) => {
     setScanning(true); setStatus(`Analysing ${tickers.length} securities…`);
     try {
@@ -454,10 +520,15 @@ export default function Home() {
       if (!res.ok) { const e=await res.json(); throw new Error(e.error||`HTTP ${res.status}`); }
       const data = await res.json();
       const arr  = Object.values(data.results).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
-      setResults(arr); setUpdatedAt(new Date().toLocaleTimeString()); setStatus('');
+      setResults(arr);
+      setUpdatedAt(new Date().toLocaleTimeString());
+      setStatus('');
+ 
+      // Merge custom scan results into the unified pool → may promote stocks into top picks
+      mergeIntoPool(data.results, 'custom');
     } catch(e) { setStatus(`Error: ${e.message}`); }
     finally { setScanning(false); }
-  }, []);
+  }, [mergeIntoPool]);
  
   function runScan() {
     const tickers = input.split(/[\s,;]+/).map(t=>t.toUpperCase().trim()).filter(Boolean).slice(0,20);
@@ -560,7 +631,7 @@ export default function Home() {
                       key={stock ? stock.ticker : `skeleton-${globalRank}`}
                       stock={stock}
                       rank={globalRank}
-                      onSignalRetry={retryTopSignal}
+                      onSignalRetry={retrySignal}
                     />
                   );
                 })}
@@ -628,7 +699,7 @@ export default function Home() {
             </div>
           ) : (
             <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-              {filtered.map((stock,i) => <ResultCard key={stock.ticker} stock={stock} rank={i+1} onSignalRetry={retryResultSignal}/>)}
+              {filtered.map((stock,i) => <ResultCard key={stock.ticker} stock={stock} rank={i+1} onSignalRetry={retrySignal}/>)}
             </div>
           )}
  
