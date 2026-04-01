@@ -335,7 +335,9 @@ export default function Home() {
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
-  const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
+  const [topStatus,setTopStatus]       = useState('Connecting…');
+  const [scanCount,setScanCount]       = useState(0);
+  const [scanTotal,setScanTotal]       = useState(0);
   const [carouselPage,setCarouselPage] = useState(0);
   const [carouselDir,setCarouselDir]   = useState(1);
   const [transitioning,setTransitioning] = useState(false);
@@ -413,27 +415,32 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handler);
   }, [nextPage, prevPage]);
  
-  // ── Auto top-picks on mount ───────────────────────────────────────────────
-  useEffect(() => {
-    let live = true;
-    (async () => {
-      try {
-        const sr = await fetch('/api/top3');
-        if (!live||!sr.ok) { if(live) setTopStatus('Could not load top picks'); return; }
-        const { candidates, totalScanned, stockMeta = {} } = await sr.json();
-        if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
-        setTopStatus(`Analysing top ${candidates.length} picks…`);
-        const ar = await fetch('/api/analyse', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({ tickers: candidates }),
-        });
-        if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
-        const { results:res } = await ar.json();
-        if (!live) return;
+  // ── Auto top-picks — progressive SSE scan ────────────────────────────────
+  // top3.js streams SSE events; each "candidates" event has the current
+  // best-N tickers after each batch of ~50 quick-fetches completes.
+  // We deep-analyse each new batch of candidates as they arrive.
+  const analysingRef = useRef(new Set());
+  const analysedRef  = useRef(new Set());
  
-        // Merge exchange metadata then push into unified pool
+  useEffect(() => {
+    let es;
+    let live = true;
+ 
+    const analyseWave = async (candidates, stockMeta) => {
+      const fresh = candidates.filter(t => !analysedRef.current.has(t) && !analysingRef.current.has(t));
+      if (!fresh.length || !live) return;
+      fresh.forEach(t => analysingRef.current.add(t));
+      try {
+        const ar = await fetch('/api/analyse', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tickers: fresh }),
+        });
+        if (!ar.ok || !live) return;
+        const { results: res } = await ar.json();
+        if (!live) return;
+        fresh.forEach(t => { analysingRef.current.delete(t); analysedRef.current.add(t); });
         const merged = Object.fromEntries(
-          Object.entries(res||{}).map(([ticker, stock]) => {
+          Object.entries(res || {}).map(([ticker, stock]) => {
             if (!stock) return [ticker, stock];
             const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
               ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
@@ -441,10 +448,40 @@ export default function Home() {
           })
         );
         mergeIntoPool(merged, 'auto');
-        setTopStatus(`${totalScanned||candidates.length} securities screened`);
-      } catch(_) { if(live) setTopStatus('Could not load top picks'); }
-    })();
-    return () => { live = false; };
+      } catch (_) {
+        fresh.forEach(t => analysingRef.current.delete(t));
+      }
+    };
+ 
+    try {
+      es = new EventSource('/api/top3');
+      es.addEventListener('candidates', (e) => {
+        if (!live) return;
+        try {
+          const { candidates, stockMeta = {}, totalScanned, totalUniverse, complete } = JSON.parse(e.data);
+          setScanCount(totalScanned || 0);
+          setScanTotal(totalUniverse || 0);
+          setTopStatus(complete
+            ? `${totalScanned} of ${totalUniverse} screened`
+            : `Scanning… ${totalScanned}${totalUniverse ? ' / ' + totalUniverse : ''}`
+          );
+          if (candidates?.length) analyseWave(candidates, stockMeta);
+        } catch (_) {}
+      });
+      es.addEventListener('done', (e) => {
+        if (!live) return;
+        try {
+          const { totalScanned, totalUniverse } = JSON.parse(e.data);
+          setTopStatus(`${totalScanned} of ${totalUniverse} screened`);
+        } catch (_) {}
+        es.close();
+      });
+      es.onerror = () => { if (live) setTopStatus('Could not load top picks'); es.close(); };
+    } catch (_) {
+      if (live) setTopStatus('Could not load top picks');
+    }
+ 
+    return () => { live = false; es?.close(); };
   }, [mergeIntoPool]);
  
   // ── Signal retry — works for both top picks and custom results ─────────
