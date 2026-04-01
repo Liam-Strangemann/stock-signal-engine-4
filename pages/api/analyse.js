@@ -1,10 +1,20 @@
-// pages/api/analyse.js  v8
+// pages/api/analyse.js  v9
 //
-// Changes from v7:
-//  - Peer PE: now fetched in parallel with all other signals (no more waterfall delay)
-//  - Insider: fixed value calculation — OpenInsider value column is already total $,
-//    removed double-multiplication; added per-tx sanity cap of $50M and total cap of $500M
-//  - Insider: Finnhub value field validated (must be realistic $/share range)
+// Changes from v8:
+//  - Insider: OpenInsider column parsing completely rewritten.
+//    Old approach used fixed index offsets which broke when rows had a
+//    leading checkbox <td> or other extra cells, shifting all columns
+//    and causing "owned after" (total shares held, e.g. 2.4M) to be
+//    read as the transaction qty instead of the actual traded qty.
+//    New approach: identifies columns by HEADER NAME from the <thead>
+//    row so the index is always correct regardless of table shape.
+//  - Insider: added per-transaction share count sanity cap (500K shares)
+//    to catch any remaining column-shift edge cases.
+//  - Insider: Finnhub deduplication key hardened — now includes name,
+//    date, share count AND transaction code to avoid over-deduplication.
+//  - Insider: Finnhub results filtered to only open-market buys (P) and
+//    sales (S); award/gift/option codes excluded from share totals.
+//  - Removed _source badge field (no longer needed by UI).
  
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
 const AV_KEY      = process.env.AV_KEY;
@@ -246,7 +256,7 @@ async function fetchSecEPS(ticker) {
 // Format helpers
 // ─────────────────────────────────────────────────────────────────────────────
 function fmt$M(n) { return !n||n===0?null:n>=1e9?`$${(n/1e9).toFixed(2)}B`:n>=1e6?`$${(n/1e6).toFixed(2)}M`:n>=1e3?`$${(n/1e3).toFixed(0)}K`:`$${n.toFixed(0)}`; }
-function fmtSh(n) { return !n||n===0?null:n>=1e6?`${(n/1e6).toFixed(2)}M shares`:n>=1e3?`${(n/1e3).toFixed(1)}K shares`:`${n.toLocaleString()} shares`; }
+function fmtSh(n) { return !n||n===0?null:n>=1e6?`${(n/1e6).toFixed(2)}M shs`:n>=1e3?`${(n/1e3).toFixed(1)}K shs`:`${n.toLocaleString()} shs`; }
 function timeAgo(ds) {
   if (!ds) return null; const d=new Date(ds); if (isNaN(d)) return null;
   const days=Math.floor((Date.now()-d)/86400000);
@@ -334,30 +344,97 @@ function resolve52w(avData, fhMetric, yahooChartMeta, yahooChartCloses) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Insider transactions — v8
+// Insider transactions — v9
 //
-// Root causes of inflated values fixed:
+// Root cause of inflated share counts (v8 → v9 fix):
 //
-//  1. Finnhub: The `value` field is the TOTAL dollar amount of the transaction.
-//     It must NOT be multiplied by shares. Also validated against a plausible
-//     range (>$0, <$50M per single transaction).
+//  OpenInsider's screener table has a variable number of columns depending
+//  on the URL parameters and browser. When a leading checkbox column is
+//  present, all fixed index offsets shift by 1, causing:
+//    cells[8]  → reads "Owned After" (e.g. 2,400,000) instead of "Qty" (e.g. 5,000)
+//    cells[11] → reads wrong column for value
 //
-//  2. OpenInsider: The `value` column (col index 9) is already the total $ value
-//     of the transaction (shares × price). It must NOT be multiplied again.
-//     Values are stripped of commas/$ and used directly.
+//  Fix: parse the <thead> row to build a name→index map. Then look up
+//  columns by canonical name rather than hardcoded offset. This is immune
+//  to extra leading/trailing columns.
 //
-//  3. All sources: per-transaction cap of $50M (individual insider buys above
-//     this are almost certainly data errors or stock grants, not open-market).
-//     Total aggregate cap of $500M retained.
-//
-// Source priority:
-//   1. Finnhub  — authenticated API, most reliable
-//   2. OpenInsider — HTML scraper, reliable fallback
-//   3. Nasdaq API — last resort
+//  Additional fixes:
+//  - Per-transaction share cap: 500K shares (catches any remaining shift bugs)
+//  - Finnhub: only P (purchase) and S (sale) codes; A/M/G excluded
+//  - Dedup key now includes transaction code to avoid over-collapsing
 // ─────────────────────────────────────────────────────────────────────────────
  
-const MAX_TX_VALUE    = 500e6;  // aggregate cap
-const MAX_SINGLE_TX   =  50e6;  // per-transaction sanity cap (~largest realistic open-market buy)
+const MAX_TX_VALUE  = 500e6;   // aggregate cap
+const MAX_SINGLE_TX =  50e6;   // per-transaction dollar cap
+const MAX_SINGLE_SH = 500_000; // per-transaction share cap (sanity)
+ 
+// Maps header text → canonical field name
+const OI_HEADER_MAP = {
+  'filing date':   'filingDate',
+  'trade date':    'tradeDate',
+  'ticker':        'ticker',
+  'company name':  'company',
+  'company':       'company',
+  'insider name':  'name',
+  'insider':       'name',
+  'title':         'title',
+  'trade type':    'type',
+  'type':          'type',
+  'price':         'price',
+  'qty':           'qty',
+  'quantity':      'qty',
+  '#shares':       'qty',
+  'shares':        'qty',
+  'owned':         'owned',
+  'shares owned':  'owned',
+  'δown%':         'deltaPct',
+  'δown':          'deltaPct',
+  'change in ownership': 'deltaPct',
+  'value':         'value',
+};
+ 
+/**
+ * Parse OpenInsider HTML table into structured rows.
+ * Returns { colMap, rows } where:
+ *   colMap: { qty: N, value: N, type: N, tradeDate: N, ... }
+ *   rows:   array of cell arrays (strings, HTML stripped)
+ */
+function parseOpenInsiderTable(html) {
+  // Extract thead to build column map
+  const theadMatch = html.match(/<thead[^>]*>([\s\S]*?)<\/thead>/i);
+  const colMap = {};
+ 
+  if (theadMatch) {
+    const headers = [...theadMatch[1].matchAll(/<th[^>]*>([\s\S]*?)<\/th>/gi)]
+      .map((m, i) => ({ text: m[1].replace(/<[^>]+>/g, '').trim().toLowerCase(), idx: i }));
+ 
+    for (const { text, idx } of headers) {
+      const canonical = OI_HEADER_MAP[text];
+      if (canonical && !(canonical in colMap)) colMap[canonical] = idx;
+    }
+  }
+ 
+  // If header parse failed, fall back to known OpenInsider default layout
+  // (filing=0, trade=1, ticker=2, company=3, name=4, title=5, type=6,
+  //  price=7, qty=8, owned=9, deltaPct=10, value=11)
+  if (!('qty' in colMap))   colMap.qty       = 8;
+  if (!('value' in colMap)) colMap.value     = 11;
+  if (!('type' in colMap))  colMap.type      = 6;
+  if (!('tradeDate' in colMap)) colMap.tradeDate = 1;
+ 
+  // Extract tbody rows
+  const tbodyMatch = html.match(/<tbody[^>]*>([\s\S]*?)<\/tbody>/i);
+  if (!tbodyMatch) return { colMap, rows: [] };
+ 
+  const rows = [...tbodyMatch[0].matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)]
+    .map(rowMatch =>
+      [...rowMatch[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+        .map(cell => cell[1].replace(/<[^>]+>/g, '').trim())
+    )
+    .filter(cells => cells.length >= 8); // minimum viable row
+ 
+  return { colMap, rows };
+}
  
 async function resolveInsider(ticker) {
   const now   = Math.floor(Date.now() / 1000);
@@ -373,53 +450,43 @@ async function resolveInsider(ticker) {
       const dt = new Date(t.transactionDate);
       return !isNaN(dt) && dt >= cut30;
     });
+ 
+    // Deduplicate: key on name + date + share + code
     const seen = new Set();
     const unique = txns.filter(t => {
-      const key = `${t.name}|${t.transactionDate}|${t.share}`;
+      const key = `${t.name}|${t.transactionDate}|${t.share}|${t.transactionCode}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
  
-    // Finnhub `value` = total transaction dollars (NOT per-share price).
-    // Filter: only open-market purchases (P) and sales (S).
-    // Sanity check: value must be positive and below per-tx cap.
-    const buys = unique.filter(t => {
-      if (t.transactionCode !== 'P') return false;
-      const v = t.value || 0;
-      // If value looks like a per-share price (< $10,000) and shares exist,
-      // it's a data quirk — compute total but cap it.
-      return true;
-    });
+    // Only open-market purchases (P) and sales (S)
+    // Exclude: A (award), M (option exercise), G (gift), D (disposition to trust), etc.
+    const buys  = unique.filter(t => t.transactionCode === 'P');
     const sells = unique.filter(t => t.transactionCode === 'S');
  
-    // Normalise: ensure value is total dollars, not per-share price
+    // Normalise value: Finnhub `value` is total $ for most records,
+    // but occasionally comes through as price/share (< $500 with share count).
     const normaliseFhValue = (t) => {
-      const v   = t.value  || 0;
-      const sh  = t.share  || 0;
-      // Heuristic: if value is non-zero and looks like a reasonable total, use it.
-      // If value is suspiciously small (< 500) but shares exist, treat as price/share.
-      if (v > 500 && v <= MAX_SINGLE_TX) return v;
-      if (v > MAX_SINGLE_TX) return 0;            // cap — discard anomalous totals
-      if (v > 0 && v <= 500 && sh > 0) return Math.min(v * sh, MAX_SINGLE_TX); // v was per-share
+      const v  = t.value || 0;
+      const sh = t.share || 0;
+      if (v > 500 && v <= MAX_SINGLE_TX) return v;           // looks like total $
+      if (v > MAX_SINGLE_TX) return 0;                       // implausible, discard
+      if (v > 0 && v <= 500 && sh > 0) return Math.min(v * sh, MAX_SINGLE_TX); // was price/share
       return 0;
     };
  
-    const normBuys  = buys.map(t  => ({ ...t, _normValue: normaliseFhValue(t) }));
-    const normSells = sells.map(t => ({ ...t, _normValue: normaliseFhValue(t) }));
+    // Apply share cap too
+    const normBuys  = buys.filter(t => (t.share||0) <= MAX_SINGLE_SH).map(t => ({ ...t, _normValue: normaliseFhValue(t) }));
+    const normSells = sells.filter(t => (t.share||0) <= MAX_SINGLE_SH).map(t => ({ ...t, _normValue: normaliseFhValue(t) }));
  
     if (normBuys.length > 0 || normSells.length > 0) {
-      return { buys: normBuys, sells: normSells, source: 'finnhub', _normalised: true };
+      return { buys: normBuys, sells: normSells, source: 'finnhub' };
     }
   } catch (_) {}
  
   // ── 2. OpenInsider ─────────────────────────────────────────────────────────
-  // Column layout (0-indexed after <td> extraction):
-  //   0: filing date   1: trade date   2: ticker   3: company name
-  //   4: insider name  5: title        6: trade type  7: price
-  //   8: qty (shares)  9: owned after  10: ΔOwn%   11: value ($)
-  //
-  // The `value` column is the TOTAL transaction value already — do NOT multiply.
+  // Column positions are resolved from the <thead>, not hardcoded.
   try {
     const r = await fetch(
       `https://openinsider.com/screener?s=${ticker}&fd=-30&td=0&xs=1&vl=0&grp=0&cnt=20&action=1`,
@@ -427,45 +494,40 @@ async function resolveInsider(ticker) {
     );
     if (r.ok) {
       const html = await r.text();
-      const rows = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)];
+      const { colMap, rows } = parseOpenInsiderTable(html);
+ 
       const buys = [], sells = [], seen = new Set();
  
-      for (const row of rows) {
-        const cells = [...row[0].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
+      for (const cells of rows) {
+        const typeRaw  = cells[colMap.type]      || '';
+        const dateRaw  = cells[colMap.tradeDate] || cells[0] || '';
+        const sharesRaw= cells[colMap.qty]        || '0';
+        const valueRaw = cells[colMap.value]      || '0';
  
-        // Need at least 12 columns for full OpenInsider layout
-        if (cells.length < 12) continue;
+        if (!dateRaw || !typeRaw) continue;
  
-        const tradeDate  = cells[1] || cells[0];   // prefer trade date over filing date
-        const typeRaw    = cells[6] || '';
-        const sharesRaw  = cells[8] || '0';
-        const valueRaw   = cells[11] || '0';        // col 11 = total $ value
- 
-        if (!tradeDate || !typeRaw) continue;
- 
-        const txDate = new Date(tradeDate);
+        const txDate = new Date(dateRaw);
         if (isNaN(txDate) || txDate < cut30) continue;
  
-        // Parse shares — strip all non-numeric except minus
-        const shares = parseInt(sharesRaw.replace(/[^0-9]/g, '')) || 0;
+        // Parse shares — strip everything except digits
+        const shares = parseInt(sharesRaw.replace(/[^0-9]/g, ''), 10) || 0;
  
-        // Parse value — OpenInsider shows it as "$1,234,567" already total
-        const valueStr = valueRaw.replace(/[$,\s]/g, '');
-        const value    = parseInt(valueStr) || 0;
+        // Hard share cap — if we somehow got "owned" column, this catches it
+        if (shares > MAX_SINGLE_SH) continue;
  
-        // Sanity checks
-        if (value > MAX_SINGLE_TX) continue;         // discard implausible single tx
+        // Parse value — already total $ on OpenInsider
+        const value = parseInt(valueRaw.replace(/[$,\s]/g, ''), 10) || 0;
+        if (value > MAX_SINGLE_TX) continue;
  
-        const key = `${tradeDate}|${shares}|${typeRaw}`;
+        const key = `${dateRaw}|${shares}|${typeRaw}`;
         if (seen.has(key)) continue;
         seen.add(key);
  
         const pricePerShare = shares > 0 && value > 0 ? value / shares : 0;
         const entry = {
-          transactionDate: tradeDate,
+          transactionDate: dateRaw,
           share: shares,
-          _normValue: value,                          // already total dollars
+          _normValue: value,
           transactionPrice: pricePerShare,
         };
  
@@ -473,7 +535,7 @@ async function resolveInsider(ticker) {
         else if (/S\s*-\s*Sale/i.test(typeRaw) || /^S$/i.test(typeRaw)) sells.push(entry);
       }
       if (buys.length > 0 || sells.length > 0) {
-        return { buys, sells, source: 'openinsider', _normalised: true };
+        return { buys, sells, source: 'openinsider' };
       }
     }
   } catch (_) {}
@@ -505,9 +567,9 @@ async function resolveInsider(ticker) {
         const isPurchase = /^P$/i.test(typeRaw) || /purchase/i.test(typeRaw);
         const isSale     = /^S$/i.test(typeRaw) || /sale/i.test(typeRaw);
         if (!isPurchase && !isSale) continue;
-        const shares = parseInt(sharesRaw.replace(/[^0-9]/g, '')) || 0;
-        // Nasdaq value field is total dollars — use directly
-        const value  = parseInt(valueRaw.replace(/[^0-9$,\s]/g, '').replace(/[$,\s]/g, '')) || 0;
+        const shares = parseInt(sharesRaw.replace(/[^0-9]/g, ''), 10) || 0;
+        if (shares > MAX_SINGLE_SH) continue;
+        const value  = parseInt(valueRaw.replace(/[$,\s]/g, ''), 10) || 0;
         if (value > MAX_SINGLE_TX) continue;
         const key = `${dateStr}|${shares}|${typeRaw}`;
         if (seen.has(key)) continue;
@@ -515,27 +577,24 @@ async function resolveInsider(ticker) {
         const entry = {
           transactionDate: dateStr,
           share: shares,
-          _normValue: value,                          // already total dollars
+          _normValue: value,
           transactionPrice: shares > 0 && value > 0 ? value / shares : 0,
         };
         if (isPurchase) buys.push(entry);
         else            sells.push(entry);
       }
-      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'nasdaq', _normalised: true };
+      if (buys.length > 0 || sells.length > 0) return { buys, sells, source: 'nasdaq' };
     }
   } catch (_) {}
  
   return { buys: [], sells: [], source: null };
 }
  
-// buildInsider: uses pre-normalised _normValue (total $) from all sources
+// buildInsider: summarises pre-normalised insider data into a signal value string
 function buildInsider(buys, sells, source) {
   if (buys.length > 0) {
     const sh  = buys.reduce((s, t) => s + (t.share || 0), 0);
-    const val = Math.min(
-      buys.reduce((s, t) => s + (t._normValue || 0), 0),
-      MAX_TX_VALUE
-    );
+    const val = Math.min(buys.reduce((s, t) => s + (t._normValue || 0), 0), MAX_TX_VALUE);
     const parts = [`${buys.length} buy${buys.length > 1 ? 's' : ''}`];
     const sv = fmtSh(sh);  if (sv) parts.push(sv);
     const dv = fmt$M(val); if (dv) parts.push(dv);
@@ -545,10 +604,7 @@ function buildInsider(buys, sells, source) {
   }
   if (sells.length > 0) {
     const sh  = sells.reduce((s, t) => s + (t.share || 0), 0);
-    const val = Math.min(
-      sells.reduce((s, t) => s + (t._normValue || 0), 0),
-      MAX_TX_VALUE
-    );
+    const val = Math.min(sells.reduce((s, t) => s + (t._normValue || 0), 0), MAX_TX_VALUE);
     const parts = [`${sells.length} sell${sells.length > 1 ? 's' : ''}, no buys`];
     const sv = fmtSh(sh);  if (sv) parts.push(sv);
     const dv = fmt$M(val); if (dv) parts.push(dv);
@@ -560,7 +616,7 @@ function buildInsider(buys, sells, source) {
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Peer PE — fetched in parallel with all other signals (no longer blocking)
+// Peer PE
 // ─────────────────────────────────────────────────────────────────────────────
 const PEERS = {
   AAPL:['MSFT','GOOGL','META','AMZN','NVDA'],  MSFT:['AAPL','GOOGL','CRM','ORCL','IBM'],
@@ -602,53 +658,14 @@ const _pePeerCache = {};
 async function getPeerPE(peer, crumbInfo) {
   if (_pePeerCache[peer]) return _pePeerCache[peer];
   const candidates = [];
- 
-  // Source 1: Yahoo chart meta
-  try {
-    const j=await yahooFetch(`/v8/finance/chart/${peer}?interval=1d&range=5d`,crumbInfo);
-    const pe=j?.chart?.result?.[0]?.meta?.trailingPE, mc=j?.chart?.result?.[0]?.meta?.marketCap||0;
-    if (pe>0&&pe<150) candidates.push({pe,mc,src:'yahoo'});
-  } catch(_){}
- 
-  // Source 2: Finnhub metric
-  try {
-    const d=await fh(`/stock/metric?symbol=${peer}&metric=all`);
-    const pe=d?.metric?.peBasicExclExtraTTM||d?.metric?.peTTM, mc=(d?.metric?.marketCapitalization||0)*1e6;
-    if (pe>0&&pe<150) candidates.push({pe,mc,src:'finnhub'});
-  } catch(_){}
- 
-  // Source 3: Alpha Vantage (only if needed)
-  if (AV_KEY&&candidates.length<2) {
-    try {
-      const d=await fetchAV(peer);
-      const pe=parseFloat(d?.PERatio), mc=parseFloat(d?.MarketCapitalization)||0;
-      if (!isNaN(pe)&&pe>0&&pe<150) candidates.push({pe,mc,src:'av'});
-    } catch(_){}
-  }
- 
-  // Source 4: stockanalysis (last resort)
-  if (candidates.length<2) {
-    try {
-      const sa=await fetchStockAnalysis(peer);
-      const pe=saExtract(sa,['pe','peRatio','trailingPE']), mc=saExtract(sa,['marketCap','marketCapitalization'])||0;
-      if (pe>0&&pe<150) candidates.push({pe,mc,src:'sa'});
-    } catch(_){}
-  }
- 
+  try { const j=await yahooFetch(`/v8/finance/chart/${peer}?interval=1d&range=5d`,crumbInfo); const pe=j?.chart?.result?.[0]?.meta?.trailingPE, mc=j?.chart?.result?.[0]?.meta?.marketCap||0; if (pe>0&&pe<150) candidates.push({pe,mc,src:'yahoo'}); } catch(_){}
+  try { const d=await fh(`/stock/metric?symbol=${peer}&metric=all`); const pe=d?.metric?.peBasicExclExtraTTM||d?.metric?.peTTM, mc=(d?.metric?.marketCapitalization||0)*1e6; if (pe>0&&pe<150) candidates.push({pe,mc,src:'finnhub'}); } catch(_){}
+  if (AV_KEY&&candidates.length<2) { try { const d=await fetchAV(peer); const pe=parseFloat(d?.PERatio), mc=parseFloat(d?.MarketCapitalization)||0; if (!isNaN(pe)&&pe>0&&pe<150) candidates.push({pe,mc,src:'av'}); } catch(_){} }
+  if (candidates.length<2) { try { const sa=await fetchStockAnalysis(peer); const pe=saExtract(sa,['pe','peRatio','trailingPE']), mc=saExtract(sa,['marketCap','marketCapitalization'])||0; if (pe>0&&pe<150) candidates.push({pe,mc,src:'sa'}); } catch(_){} }
   if (!candidates.length) return null;
- 
-  // Cross-validate: if 2+ sources agree within 40%, use median; otherwise take lower
   let pe, mc;
-  if (candidates.length>=2) {
-    const pes=candidates.map(c=>c.pe).sort((a,b)=>a-b);
-    const spread=(pes[pes.length-1]-pes[0])/pes[0];
-    pe = spread>0.4 ? pes[0] : pes[Math.floor(pes.length/2)];
-    mc = candidates[0].mc;
-  } else {
-    pe = candidates[0].pe;
-    mc = candidates[0].mc;
-  }
- 
+  if (candidates.length>=2) { const pes=candidates.map(c=>c.pe).sort((a,b)=>a-b); const spread=(pes[pes.length-1]-pes[0])/pes[0]; pe = spread>0.4 ? pes[0] : pes[Math.floor(pes.length/2)]; mc = candidates[0].mc; }
+  else { pe = candidates[0].pe; mc = candidates[0].mc; }
   _pePeerCache[peer] = {ticker:peer, pe, mc};
   return _pePeerCache[peer];
 }
@@ -660,45 +677,20 @@ async function resolvePeerPE(ticker, curPE, targetMC, crumbInfo) {
     if (PEERS[ticker]) peerList=[...new Set([...peerList,...PEERS[ticker]])].filter(p=>p!==ticker);
     peerList=peerList.slice(0,10);
     if (!peerList.length) return null;
- 
     const res = await Promise.allSettled(peerList.map(p => getPeerPE(p, crumbInfo)));
     const all = res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
     if (!all.length) return null;
- 
-    // Market-cap tier filter
     let comps=all;
-    if (targetMC>0&&all.filter(c=>c.mc>0).length>=2) {
-      const lo=targetMC>500000?0.07:0.12, hi=targetMC>500000?14:8;
-      const f=all.filter(c=>c.mc===0||(c.mc/1e6/targetMC>=lo&&c.mc/1e6/targetMC<=hi));
-      if (f.length>=2) comps=f;
-    }
- 
-    // Aggressive outlier removal
-    if (comps.length>=5) {
-      const s=[...comps].sort((a,b)=>a.pe-b.pe);
-      const trim=Math.max(1,Math.floor(s.length*0.2));
-      comps=s.slice(trim,s.length-trim);
-    } else if (comps.length>=3) {
-      const s=[...comps].sort((a,b)=>a.pe-b.pe);
-      const median=s[Math.floor(s.length/2)].pe;
-      comps=s.filter(c=>c.pe<=median*2.5);
-    }
- 
+    if (targetMC>0&&all.filter(c=>c.mc>0).length>=2) { const lo=targetMC>500000?0.07:0.12, hi=targetMC>500000?14:8; const f=all.filter(c=>c.mc===0||(c.mc/1e6/targetMC>=lo&&c.mc/1e6/targetMC<=hi)); if (f.length>=2) comps=f; }
+    if (comps.length>=5) { const s=[...comps].sort((a,b)=>a.pe-b.pe); const trim=Math.max(1,Math.floor(s.length*0.2)); comps=s.slice(trim,s.length-trim); }
+    else if (comps.length>=3) { const s=[...comps].sort((a,b)=>a.pe-b.pe); const median=s[Math.floor(s.length/2)].pe; comps=s.filter(c=>c.pe<=median*2.5); }
     if (comps.length<2) return null;
- 
     const pes=comps.map(c=>c.pe).sort((a,b)=>a-b);
     const mid=Math.floor(pes.length/2);
     const med=pes.length%2===0?(pes[mid-1]+pes[mid])/2:pes[mid];
     const avg=pes.reduce((a,b)=>a+b,0)/pes.length;
     const diff=curPE&&curPE>0?parseFloat(((curPE-avg)/avg*100).toFixed(1)):null;
- 
-    return {
-      medianPE: parseFloat(med.toFixed(1)),
-      avgPE:    parseFloat(avg.toFixed(1)),
-      peerCount:comps.length,
-      diff,
-      peers:    comps.map(c=>c.ticker),
-    };
+    return { medianPE: parseFloat(med.toFixed(1)), avgPE: parseFloat(avg.toFixed(1)), peerCount:comps.length, diff, peers: comps.map(c=>c.ticker) };
   } catch(_){ return null; }
 }
  
@@ -722,8 +714,7 @@ function cleanExchange(raw){
 }
  
 // ─────────────────────────────────────────────────────────────────────────────
-// Master fetch — v8: peerPE now runs IN PARALLEL with eps/ma50/pe/target/insider
-// Previously it ran after those resolved (sequential waterfall = slow).
+// Master fetch
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchStockData(ticker, crumbInfo) {
   const [quoteR,profileR,metricsR,earningsR,yhChartR,avR]=await Promise.allSettled([
@@ -742,17 +733,12 @@ async function fetchStockData(ticker, crumbInfo) {
   const yhMeta = yhChart?.chart?.result?.[0]?.meta||{};
   const yhClose= yhChart?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
  
-  // ── Run ALL signals in parallel — including peerPE ────────────────────────
-  // Previously: eps/ma50/pe/target/insider ran first, then peerPE ran after.
-  // Now: everything fires at the same time. peerPE is no longer on the critical path.
   const [eps, ma50, curPE, analystTarget, insiderData, peerPE] = await Promise.all([
     resolveEPS(ticker, avData, fhM, crumbInfo),
     resolveMA50(ticker, avData, crumbInfo, yhChart),
     resolvePE(ticker, avData, fhM, crumbInfo, yhChart),
     resolveTarget(ticker, avData, crumbInfo),
     resolveInsider(ticker),
-    // peerPE needs curPE and mc — we use the synchronously available fhM values
-    // (same data used everywhere else) rather than waiting for the resolved curPE.
     resolvePeerPE(
       ticker,
       fhM?.peBasicExclExtraTTM || fhM?.peTTM || parseFloat(avData?.PERatio) || null,
