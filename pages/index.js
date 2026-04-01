@@ -335,7 +335,7 @@ export default function Home() {
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
-  const [topStatus,setTopStatus]       = useState('Scanning universe…');
+  const [topStatus,setTopStatus]       = useState('Scanning ~200 securities…');
   const [carouselPage,setCarouselPage] = useState(0);
   const [carouselDir,setCarouselDir]   = useState(1);
   const [transitioning,setTransitioning] = useState(false);
@@ -413,52 +413,36 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handler);
   }, [nextPage, prevPage]);
  
-  // ── Auto top-picks on mount ─────────────────────────────────────────────
-  // 1. Fetch quick scores for the full universe from /api/top3 (plain JSON).
-  // 2. Deep-analyse the top-20 candidates in two waves of 10 so results
-  //    appear fast while the second half loads in the background.
+  // ── Auto top-picks on mount ───────────────────────────────────────────────
   useEffect(() => {
     let live = true;
     (async () => {
       try {
         const sr = await fetch('/api/top3');
-        if (!live || !sr.ok) { if (live) setTopStatus('Could not load top picks'); return; }
-        const { candidates, totalScanned, totalUniverse, stockMeta = {} } = await sr.json();
-        if (!live || !candidates?.length) { if (live) setTopStatus('No candidates found'); return; }
+        if (!live||!sr.ok) { if(live) setTopStatus('Could not load top picks'); return; }
+        const { candidates, totalScanned, stockMeta = {} } = await sr.json();
+        if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
+        setTopStatus(`Analysing top ${candidates.length} picks…`);
+        const ar = await fetch('/api/analyse', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ tickers: candidates }),
+        });
+        if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
+        const { results:res } = await ar.json();
+        if (!live) return;
  
-        setTopStatus(`${totalScanned} of ${totalUniverse} screened · analysing…`);
- 
-        // Wave 1 — first 10 candidates (shows results fast)
-        const wave1 = candidates.slice(0, 10);
-        const wave2 = candidates.slice(10);
- 
-        const runWave = async (tickers) => {
-          if (!tickers.length || !live) return;
-          const ar = await fetch('/api/analyse', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tickers }),
-          });
-          if (!ar.ok || !live) return;
-          const { results: res } = await ar.json();
-          if (!live) return;
-          const merged = Object.fromEntries(
-            Object.entries(res || {}).map(([ticker, stock]) => {
-              if (!stock) return [ticker, stock];
-              const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
-                ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
-              return [ticker, { ...stock, exchange }];
-            })
-          );
-          mergeIntoPool(merged, 'auto');
-        };
- 
-        // Run wave 1, then wave 2 in background — UI updates after each
-        await runWave(wave1);
-        if (live) setTopStatus(`${totalScanned} of ${totalUniverse} screened`);
-        runWave(wave2); // intentionally not awaited — updates picks when it lands
-      } catch (_) {
-        if (live) setTopStatus('Could not load top picks');
-      }
+        // Merge exchange metadata then push into unified pool
+        const merged = Object.fromEntries(
+          Object.entries(res||{}).map(([ticker, stock]) => {
+            if (!stock) return [ticker, stock];
+            const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
+              ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
+            return [ticker, { ...stock, exchange }];
+          })
+        );
+        mergeIntoPool(merged, 'auto');
+        setTopStatus(`${totalScanned||candidates.length} securities screened`);
+      } catch(_) { if(live) setTopStatus('Could not load top picks'); }
     })();
     return () => { live = false; };
   }, [mergeIntoPool]);
@@ -725,4 +709,3 @@ export default function Home() {
     </>
   );
 }
- 
