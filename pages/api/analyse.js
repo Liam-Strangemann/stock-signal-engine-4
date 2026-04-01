@@ -12,12 +12,12 @@
 //  OpenInsider: header-driven column mapping retained. If <thead> cannot be
 //  parsed the source is skipped entirely (no fallback to fixed offsets which
 //  caused the "owned" column to be read as qty).
- 
+
 const FINNHUB_KEY = process.env.FINNHUB_KEY;
 const AV_KEY      = process.env.AV_KEY;
 const FH  = 'https://finnhub.io/api/v1';
 const AV  = 'https://www.alphavantage.co/query';
- 
+
 const BROWSER = {
   'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -30,7 +30,7 @@ const API_HEADERS = {
   'Accept':'application/json, text/plain, */*','Accept-Language':'en-US,en;q=0.9',
   'Origin':'https://finance.yahoo.com','Referer':'https://finance.yahoo.com/',
 };
- 
+
 async function fh(path) {
   if (!FINNHUB_KEY) throw new Error('No FINNHUB_KEY');
   const sep = path.includes('?') ? '&' : '?';
@@ -42,7 +42,7 @@ async function getPage(url,timeoutMs=9000){
   const r=await fetch(url,{headers:BROWSER,signal:AbortSignal.timeout(timeoutMs),redirect:'follow'});
   if(!r.ok)throw new Error(`HTTP ${r.status}`); return r.text();
 }
- 
+
 let _crumb=null,_cookies='',_crumbTs=0;
 async function getYahooCrumb(){
   if(_crumb&&Date.now()-_crumbTs<300000)return{crumb:_crumb,cookies:_cookies};
@@ -66,14 +66,14 @@ async function yahooFetch(path,crumbInfo){
   }
   return null;
 }
- 
+
 const _avCache={};
 async function fetchAV(ticker){
   if(_avCache[ticker])return _avCache[ticker];if(!AV_KEY)return null;
   try{const r=await fetch(`${AV}?function=OVERVIEW&symbol=${ticker}&apikey=${AV_KEY}`,{headers:{'User-Agent':'Mozilla/5.0'},signal:AbortSignal.timeout(10000)});
     if(!r.ok)return null;const d=await r.json();if(!d?.Symbol||d?.Information||d?.Note)return null;_avCache[ticker]=d;return d;}catch(_){return null;}
 }
- 
+
 const _saCache={};
 async function fetchStockAnalysis(ticker){
   if(_saCache[ticker])return _saCache[ticker];
@@ -91,7 +91,7 @@ function saExtract(sa,fields){
   for(const field of fields){const parts=field.split('.');let val=sa;for(const p of parts){val=val?.[p];if(val===undefined)break;}if(val!=null&&val!==''&&!isNaN(parseFloat(val)))return parseFloat(val);}
   return null;
 }
- 
+
 const _mwCache={};
 async function fetchMarketWatch(ticker){
   if(_mwCache[ticker])return _mwCache[ticker];
@@ -111,7 +111,7 @@ function mwExtractEPS(mw){
   for(const p of[/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/,/EPS \(TTM\)[^<]*<\/[^>]+>[^<]*<[^>]+>([-\d.]+)/,/"eps"\s*:\s*([-\d.]+)/]){const m=mw.raw.match(p);if(m){const v=parseFloat(m[1]);if(v!==0&&!isNaN(v))return v;}}
   return null;
 }
- 
+
 async function fetchZacks(ticker){try{return await getPage(`https://www.zacks.com/stock/quote/${ticker.toUpperCase()}`);}catch(_){return null;}}
 function zacksExtractPE(html){
   if(!html)return null;
@@ -123,14 +123,14 @@ function zacksExtractTarget(html){
   for(const p of[/Price Target[^<]*<[^>]+>\s*\$([\d.]+)/i,/Zacks Mean Target[^<]*<[^>]+>\s*\$([\d.]+)/i,/"targetPrice"\s*:\s*([\d.]+)/,/consensus.*?target.*?\$([\d,]+\.?\d*)/i]){const m=html.match(p);if(m){const v=parseFloat(m[1].replace(/,/g,''));if(v>0)return v;}}
   return null;
 }
- 
+
 async function fetchMacrotrendsEPS(ticker){
   try{const html=await getPage(`https://www.macrotrends.net/stocks/charts/${ticker.toUpperCase()}/x/eps-earnings-per-share-diluted`,10000);
     const m=html.match(/var\s+chartData\s*=\s*(\[[\s\S]*?\]);/);
     if(m){const arr=JSON.parse(m[1]);const r=arr.filter(a=>a?.[1]!=null&&!isNaN(parseFloat(a[1]))).slice(0,4);if(r.length>0)return parseFloat(r[0][1]);}}catch(_){}
   return null;
 }
- 
+
 const _cikCache={};
 async function getSecCIK(ticker){
   if(_cikCache[ticker])return _cikCache[ticker];
@@ -151,7 +151,7 @@ async function fetchSecEPS(ticker){
     }}catch(_){}
   return null;
 }
- 
+
 function fmt$M(n){return !n||n===0?null:n>=1e9?`$${(n/1e9).toFixed(2)}B`:n>=1e6?`$${(n/1e6).toFixed(2)}M`:n>=1e3?`$${(n/1e3).toFixed(0)}K`:`$${n.toFixed(0)}`;}
 function fmtSh(n){return !n||n===0?null:n>=1e6?`${(n/1e6).toFixed(2)}M shs`:n>=1e3?`${(n/1e3).toFixed(1)}K shs`:`${n.toLocaleString()} shs`;}
 function timeAgo(ds){
@@ -159,13 +159,13 @@ function timeAgo(ds){
   const days=Math.floor((Date.now()-d)/86400000);
   return days===0?'today':days===1?'1d ago':days<7?`${days}d ago`:days<14?'1w ago':days<30?`${Math.floor(days/7)}w ago`:`${Math.floor(days/30)}mo ago`;
 }
- 
+
 function compute50dMA(closes){
   if(!Array.isArray(closes))return null;
   const v=closes.filter(c=>c!=null&&!isNaN(c)&&c>0);if(v.length<20)return null;
   const sl=v.slice(-50);return sl.reduce((a,b)=>a+b,0)/sl.length;
 }
- 
+
 async function resolveMA50(ticker,avData,crumbInfo,yahooChartData){
   const av=parseFloat(avData?.['50DayMovingAverage']);if(av>0&&!isNaN(av))return av;
   const yhCloses=yahooChartData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(c=>c!=null&&!isNaN(c)&&c>0)||[];
@@ -178,7 +178,7 @@ async function resolveMA50(ticker,avData,crumbInfo,yahooChartData){
     if(r.ok){const text=await r.text();if(text.length>100&&!text.toLowerCase().includes('no data')){const lines=text.trim().split('\n').slice(1);const closes=lines.slice(-60).map(l=>parseFloat((l.split(',')[4]||'').trim())).filter(c=>!isNaN(c)&&c>0);const ma=compute50dMA(closes);if(ma>0)return ma;}}}catch(_){}
   return null;
 }
- 
+
 async function resolveEPS(ticker,avData,fhMetric,crumbInfo){
   const avEPS=parseFloat(avData?.EPS);if(!isNaN(avEPS)&&avEPS!==0)return avEPS;
   const fhEPS=fhMetric?.epsTTM||fhMetric?.epsBasicExclExtraAnnual;if(fhEPS&&fhEPS!==0)return fhEPS;
@@ -191,7 +191,7 @@ async function resolveEPS(ticker,avData,fhMetric,crumbInfo){
   try{const html=await fetchZacks(ticker);if(html){const m=html.match(/EPS\s*\(TTM\)[^<]*<[^>]+>\s*\$?\s*([-\d.]+)/i)||html.match(/"epsTrailingTwelveMonths"\s*:\s*([-\d.]+)/);if(m){const v=parseFloat(m[1]);if(v!==0&&!isNaN(v))return v;}}}catch(_){}
   return null;
 }
- 
+
 async function resolvePE(ticker,avData,fhMetric,crumbInfo,yahooChartData){
   const avPE=parseFloat(avData?.PERatio);if(!isNaN(avPE)&&avPE>0&&avPE<150)return avPE;
   const fhPE=fhMetric?.peBasicExclExtraTTM||fhMetric?.peTTM;if(fhPE>0&&fhPE<150)return fhPE;
@@ -202,7 +202,7 @@ async function resolvePE(ticker,avData,fhMetric,crumbInfo,yahooChartData){
   try{const html=await fetchZacks(ticker);const pe=zacksExtractPE(html);if(pe>0&&pe<150)return pe;}catch(_){}
   return null;
 }
- 
+
 async function resolveTarget(ticker,avData,crumbInfo){
   const avT=parseFloat(avData?.AnalystTargetPrice);if(!isNaN(avT)&&avT>0)return avT;
   try{const d=await fh(`/stock/price-target?symbol=${ticker}`);const t=d?.targetMedian||d?.targetMean;if(t>0)return t;}catch(_){}
@@ -216,7 +216,7 @@ async function resolveTarget(ticker,avData,crumbInfo){
     for(const p of[/target\s*price[^$<]*\$\s*([\d,]+\.?\d*)/i,/mean\s*target[^$<]*\$\s*([\d,]+\.?\d*)/i]){const m=html.match(p);if(m){const v=parseFloat(m[1].replace(/,/g,''));if(v>0)return v;}}}catch(_){}
   return null;
 }
- 
+
 function resolve52w(avData,fhMetric,yahooChartMeta,yahooChartCloses){
   let hi=fhMetric?.['52WeekHigh']||parseFloat(avData?.['52WeekHigh'])||yahooChartMeta?.fiftyTwoWeekHigh||null;
   let lo=fhMetric?.['52WeekLow']||parseFloat(avData?.['52WeekLow'])||yahooChartMeta?.fiftyTwoWeekLow||null;
@@ -224,7 +224,7 @@ function resolve52w(avData,fhMetric,yahooChartMeta,yahooChartCloses){
   if((!hi||!lo)&&yahooChartCloses.length>50){if(!hi)hi=Math.max(...yahooChartCloses);if(!lo)lo=Math.min(...yahooChartCloses);}
   return{hi52:hi,lo52:lo};
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Insider — v10 DEFINITIVE FIX
 //
@@ -237,7 +237,7 @@ function resolve52w(avData,fhMetric,yahooChartMeta,yahooChartCloses){
 const MAX_TX_VALUE  = 500e6;
 const MAX_SINGLE_TX =  50e6;
 const MAX_SINGLE_SH = 250_000; // realistic cap for single open-market insider buy
- 
+
 const OI_HEADER_MAP = {
   'filing date':'filingDate','trade date':'tradeDate','ticker':'ticker',
   'company name':'company','company':'company','insider name':'name','insider':'name',
@@ -247,7 +247,7 @@ const OI_HEADER_MAP = {
   'δown%':'deltaPct','δown':'deltaPct','change in ownership':'deltaPct',
   'value':'value',
 };
- 
+
 function parseOpenInsiderTable(html){
   const theadMatch=html.match(/<thead[^>]*>([\s\S]*?)<\/thead>/i);
   const colMap={};
@@ -260,7 +260,7 @@ function parseOpenInsiderTable(html){
   // Never fall back to fixed offsets — that's what caused the bug.
   const ok='qty'in colMap&&'value'in colMap&&'type'in colMap;
   if(!ok)return{colMap,rows:[],ok:false};
- 
+
   const tbodyMatch=html.match(/<tbody[^>]*>([\s\S]*?)<\/tbody>/i);
   if(!tbodyMatch)return{colMap,rows:[],ok:false};
   const rows=[...tbodyMatch[0].matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)]
@@ -268,31 +268,31 @@ function parseOpenInsiderTable(html){
     .filter(cells=>cells.length>=8);
   return{colMap,rows,ok:true};
 }
- 
+
 async function resolveInsider(ticker){
   const now=Math.floor(Date.now()/1000);
   const ago30=now-30*86400;
   const from=new Date(ago30*1000).toISOString().slice(0,10);
   const to=new Date(now*1000).toISOString().slice(0,10);
   const cut30=new Date(ago30*1000);
- 
+
   // ── 1. Finnhub ──────────────────────────────────────────────────────────────
   // t.change = shares traded this transaction (POSITIVE for buys, can be negative for sales)
   // t.share  = total shares held after transaction — DO NOT USE for qty
   try{
     const d=await fh(`/stock/insider-transactions?symbol=${ticker}&from=${from}&to=${to}`);
     const txns=(d?.data||[]).filter(t=>{const dt=new Date(t.transactionDate);return!isNaN(dt)&&dt>=cut30;});
- 
+
     const seen=new Set();
     const unique=txns.filter(t=>{
       const key=`${t.name}|${t.transactionDate}|${t.change}|${t.transactionCode}`;
       if(seen.has(key))return false;seen.add(key);return true;
     });
- 
+
     // Only open-market purchases (P) and sales (S). Exclude A/M/G/D etc.
     const rawBuys=unique.filter(t=>t.transactionCode==='P');
     const rawSells=unique.filter(t=>t.transactionCode==='S');
- 
+
     const normalise=(t)=>{
       const traded=Math.abs(t.change||0);   // ← SHARES TRADED (not t.share)
       if(traded<=0||traded>MAX_SINGLE_SH)return null;
@@ -303,13 +303,13 @@ async function resolveInsider(ticker){
       else if(v>0&&v<=500&&traded>0)normVal=Math.min(v*traded,MAX_SINGLE_TX);
       return{...t,_sharesTraded:traded,_normValue:normVal};
     };
- 
+
     const buys=rawBuys.map(normalise).filter(Boolean);
     const sells=rawSells.map(normalise).filter(Boolean);
- 
+
     if(buys.length>0||sells.length>0)return{buys,sells,source:'finnhub'};
   }catch(_){}
- 
+
   // ── 2. OpenInsider ──────────────────────────────────────────────────────────
   try{
     const r=await fetch(
@@ -320,27 +320,27 @@ async function resolveInsider(ticker){
       const html=await r.text();
       const{colMap,rows,ok}=parseOpenInsiderTable(html);
       if(!ok)throw new Error('OI headers not parsed — skipping');
- 
+
       const buys=[],sells=[],seen=new Set();
       for(const cells of rows){
         const typeRaw=cells[colMap.type]||'';
         const dateRaw=cells[colMap.tradeDate]||cells[colMap.filingDate]||'';
         const sharesRaw=cells[colMap.qty]||'0';   // qty column — never owned
         const valueRaw=cells[colMap.value]||'0';
- 
+
         if(!dateRaw||!typeRaw)continue;
         const txDate=new Date(dateRaw);
         if(isNaN(txDate)||txDate<cut30)continue;
- 
+
         const shares=parseInt(sharesRaw.replace(/[^0-9]/g,''),10)||0;
         if(shares<=0||shares>MAX_SINGLE_SH)continue;
- 
+
         const value=parseInt(valueRaw.replace(/[$,\s]/g,''),10)||0;
         if(value>MAX_SINGLE_TX)continue;
- 
+
         const key=`${dateRaw}|${shares}|${typeRaw}`;
         if(seen.has(key))continue;seen.add(key);
- 
+
         const entry={transactionDate:dateRaw,_sharesTraded:shares,_normValue:value,
           transactionPrice:shares>0&&value>0?value/shares:0};
         if(/P\s*-\s*Purchase/i.test(typeRaw)||/^P$/i.test(typeRaw))buys.push(entry);
@@ -349,7 +349,7 @@ async function resolveInsider(ticker){
       if(buys.length>0||sells.length>0)return{buys,sells,source:'openinsider'};
     }
   }catch(_){}
- 
+
   // ── 3. Nasdaq (last resort) ─────────────────────────────────────────────────
   try{
     const r=await fetch(
@@ -382,10 +382,10 @@ async function resolveInsider(ticker){
       if(buys.length>0||sells.length>0)return{buys,sells,source:'nasdaq'};
     }
   }catch(_){}
- 
+
   return{buys:[],sells:[],source:null};
 }
- 
+
 // buildInsider uses _sharesTraded exclusively — never the old .share field
 function buildInsider(buys,sells,source){
   if(buys.length>0){
@@ -410,7 +410,7 @@ function buildInsider(buys,sells,source){
   }
   return{status:'neutral',value:source?'No activity (30d)':'No data'};
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Peer PE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -481,7 +481,7 @@ async function resolvePeerPE(ticker,curPE,targetMC,crumbInfo){
     return{medianPE:parseFloat(med.toFixed(1)),avgPE:parseFloat(avg.toFixed(1)),peerCount:comps.length,diff,peers:comps.map(c=>c.ticker)};
   }catch(_){return null;}
 }
- 
+
 function getRating(s){
   if(s>=5)return{label:'Strong Buy',color:'#14532d',bg:'#dcfce7',border:'#86efac'};
   if(s===4)return{label:'Buy',color:'#15803d',bg:'#f0fdf4',border:'#bbf7d0'};
@@ -494,7 +494,7 @@ function cleanExchange(raw){
   if(u.includes('LSE')||u.includes('LONDON'))return'LSE';if(u.includes('TSX')||u.includes('TORONTO'))return'TSX';
   return raw.split(/[\s,]/)[0].toUpperCase()||'NYSE';
 }
- 
+
 async function fetchStockData(ticker,crumbInfo){
   const[quoteR,profileR,metricsR,earningsR,yhChartR,avR]=await Promise.allSettled([
     fh(`/quote?symbol=${ticker}`),fh(`/stock/profile2?symbol=${ticker}`),
@@ -516,32 +516,32 @@ async function fetchStockData(ticker,crumbInfo){
   const{hi52,lo52}=resolve52w(avData,fhM,yhMeta,yhClose);
   return{quote:quoteR.status==='fulfilled'?quoteR.value:null,profile:profileR.status==='fulfilled'?profileR.value:null,earnings:earningsR.status==='fulfilled'?earningsR.value:null,hi52,lo52,curPE,eps,ma50,analystTarget,insiderData,peerPE};
 }
- 
+
 function evaluate(ticker,d){
   const q=d.quote||{},p=d.profile||{};const curPx=q.c;if(!curPx)return null;
   const company=p.name||ticker;
   const mc=p.marketCapitalization?p.marketCapitalization*1e6:0;
   const mcs=mc>1e12?`$${(mc/1e12).toFixed(2)}T`:mc>1e9?`$${(mc/1e9).toFixed(1)}B`:mc>1e6?`$${(mc/1e6).toFixed(0)}M`:'';
   const exchange=cleanExchange(p.exchange);
- 
+
   let s1={status:'neutral',value:'No data'};
   try{const earns=Array.isArray(d.earnings)?d.earnings:[];if(earns.length>0){const e=earns[0],diff=e.actual-e.estimate,beat=diff>=0;const ds=Math.abs(diff)<0.005?'in-line':beat?`+$${Math.abs(diff).toFixed(2)}`:`-$${Math.abs(diff).toFixed(2)}`;s1={status:beat?'pass':'fail',value:beat?`Beat by ${ds}`:`Missed ${ds}`};}}catch(_){}
- 
+
   let s2={status:'neutral',value:'No data'};
   try{if(d.curPE&&d.curPE>0&&d.eps&&d.eps!==0&&d.hi52&&d.lo52&&d.hi52>d.lo52){const histPE=(d.hi52+d.lo52)/2/d.eps;if(histPE>0&&histPE<1000){if(d.curPE<histPE*0.92)s2={status:'pass',value:`PE ${d.curPE.toFixed(1)}x < hist ~${histPE.toFixed(0)}x`};else if(d.curPE>histPE*1.08)s2={status:'fail',value:`PE ${d.curPE.toFixed(1)}x > hist ~${histPE.toFixed(0)}x`};else s2={status:'neutral',value:`PE ${d.curPE.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x`};}}else if(d.curPE&&d.curPE>0)s2={status:'neutral',value:`PE ${d.curPE.toFixed(1)}x`};}catch(_){}
- 
+
   let s3={status:'neutral',value:'No data'};
   try{if(d.ma50&&d.ma50>0&&curPx){const pct=((curPx-d.ma50)/d.ma50*100).toFixed(1);s3=curPx<=d.ma50?{status:'pass',value:`$${curPx.toFixed(2)} ≤ MA $${d.ma50.toFixed(2)} (${pct}%)`}:{status:'fail',value:`$${curPx.toFixed(2)} > MA $${d.ma50.toFixed(2)} (+${pct}%)`};}}catch(_){}
- 
+
   const{buys,sells,source}=d.insiderData||{buys:[],sells:[],source:null};
   const s4=buildInsider(buys,sells,source);
- 
+
   let s5={status:'neutral',value:'No data'};
   try{const tgt=d.analystTarget;if(tgt&&tgt>0&&curPx){const up=((tgt-curPx)/curPx*100).toFixed(1);s5=parseFloat(up)>=25?{status:'pass',value:`Target $${tgt.toFixed(2)}, +${up}% upside`}:{status:'fail',value:`Target $${tgt.toFixed(2)}, +${up}% upside`};}}catch(_){}
- 
+
   let s6={status:'neutral',value:'No data'};
   try{const pp=d.peerPE;if(pp&&pp.avgPE&&pp.diff!==null){const absDiff=Math.abs(pp.diff);if(pp.diff<-8)s6={status:'pass',value:`${absDiff.toFixed(0)}% < peer avg ${pp.avgPE}x`};else if(pp.diff>8)s6={status:'fail',value:`${absDiff.toFixed(0)}% > peer avg ${pp.avgPE}x`};else s6={status:'neutral',value:`In line with peers (avg ${pp.avgPE}x)`};}else if(d.peerPE?.avgPE)s6={status:'neutral',value:`Peer avg ${d.peerPE.avgPE}x`};}catch(_){}
- 
+
   const signals=[s1,s2,s3,s4,s5,s6];
   const score=signals.filter(s=>s.status==='pass').length;
   const NAMES=['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside','PE vs peers'];
@@ -553,13 +553,13 @@ function evaluate(ticker,d){
   else if(score===3)summary=`Moderate signals (3/6). Passes: ${passes.join(', ')}.`;
   else if(score>0)summary=`Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
   else summary=`No signals pass. Fails: ${fails.join(', ')}.`;
- 
+
   return{ticker,company,exchange,price:`$${curPx.toFixed(2)}`,
     change:q.dp!=null?`${q.dp>0?'+':''}${q.dp.toFixed(2)}%`:null,
     marketCap:mcs,score,signals,summary,rating:getRating(score),
     peerPE:d.peerPE||null,updatedAt:new Date().toISOString()};
 }
- 
+
 export default async function handler(req,res){
   if(req.method!=='POST')return res.status(405).json({error:'Method not allowed'});
   if(!FINNHUB_KEY)return res.status(500).json({error:'FINNHUB_KEY not set'});
@@ -579,4 +579,3 @@ export default async function handler(req,res){
   res.setHeader('Cache-Control','s-maxage=300, stale-while-revalidate');
   return res.status(200).json({results,fetchedAt:new Date().toISOString()});
 }
- 
