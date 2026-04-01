@@ -335,9 +335,7 @@ export default function Home() {
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
-  const [topStatus,setTopStatus]       = useState('Connecting…');
-  const [scanCount,setScanCount]       = useState(0);
-  const [scanTotal,setScanTotal]       = useState(0);
+  const [topStatus,setTopStatus]       = useState('Scanning universe…');
   const [carouselPage,setCarouselPage] = useState(0);
   const [carouselDir,setCarouselDir]   = useState(1);
   const [transitioning,setTransitioning] = useState(false);
@@ -415,73 +413,54 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handler);
   }, [nextPage, prevPage]);
  
-  // ── Auto top-picks — progressive SSE scan ────────────────────────────────
-  // top3.js streams SSE events; each "candidates" event has the current
-  // best-N tickers after each batch of ~50 quick-fetches completes.
-  // We deep-analyse each new batch of candidates as they arrive.
-  const analysingRef = useRef(new Set());
-  const analysedRef  = useRef(new Set());
- 
+  // ── Auto top-picks on mount ─────────────────────────────────────────────
+  // 1. Fetch quick scores for the full universe from /api/top3 (plain JSON).
+  // 2. Deep-analyse the top-20 candidates in two waves of 10 so results
+  //    appear fast while the second half loads in the background.
   useEffect(() => {
-    let es;
     let live = true;
- 
-    const analyseWave = async (candidates, stockMeta) => {
-      const fresh = candidates.filter(t => !analysedRef.current.has(t) && !analysingRef.current.has(t));
-      if (!fresh.length || !live) return;
-      fresh.forEach(t => analysingRef.current.add(t));
+    (async () => {
       try {
-        const ar = await fetch('/api/analyse', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tickers: fresh }),
-        });
-        if (!ar.ok || !live) return;
-        const { results: res } = await ar.json();
-        if (!live) return;
-        fresh.forEach(t => { analysingRef.current.delete(t); analysedRef.current.add(t); });
-        const merged = Object.fromEntries(
-          Object.entries(res || {}).map(([ticker, stock]) => {
-            if (!stock) return [ticker, stock];
-            const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
-              ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
-            return [ticker, { ...stock, exchange }];
-          })
-        );
-        mergeIntoPool(merged, 'auto');
-      } catch (_) {
-        fresh.forEach(t => analysingRef.current.delete(t));
-      }
-    };
+        const sr = await fetch('/api/top3');
+        if (!live || !sr.ok) { if (live) setTopStatus('Could not load top picks'); return; }
+        const { candidates, totalScanned, totalUniverse, stockMeta = {} } = await sr.json();
+        if (!live || !candidates?.length) { if (live) setTopStatus('No candidates found'); return; }
  
-    try {
-      es = new EventSource('/api/top3');
-      es.addEventListener('candidates', (e) => {
-        if (!live) return;
-        try {
-          const { candidates, stockMeta = {}, totalScanned, totalUniverse, complete } = JSON.parse(e.data);
-          setScanCount(totalScanned || 0);
-          setScanTotal(totalUniverse || 0);
-          setTopStatus(complete
-            ? `${totalScanned} of ${totalUniverse} screened`
-            : `Scanning… ${totalScanned}${totalUniverse ? ' / ' + totalUniverse : ''}`
+        setTopStatus(`${totalScanned} of ${totalUniverse} screened · analysing…`);
+ 
+        // Wave 1 — first 10 candidates (shows results fast)
+        const wave1 = candidates.slice(0, 10);
+        const wave2 = candidates.slice(10);
+ 
+        const runWave = async (tickers) => {
+          if (!tickers.length || !live) return;
+          const ar = await fetch('/api/analyse', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tickers }),
+          });
+          if (!ar.ok || !live) return;
+          const { results: res } = await ar.json();
+          if (!live) return;
+          const merged = Object.fromEntries(
+            Object.entries(res || {}).map(([ticker, stock]) => {
+              if (!stock) return [ticker, stock];
+              const exchange = (stock.exchange && stock.exchange !== 'NYSE' && stock.exchange !== 'INTL')
+                ? stock.exchange : (stockMeta[ticker]?.exchange || stock.exchange);
+              return [ticker, { ...stock, exchange }];
+            })
           );
-          if (candidates?.length) analyseWave(candidates, stockMeta);
-        } catch (_) {}
-      });
-      es.addEventListener('done', (e) => {
-        if (!live) return;
-        try {
-          const { totalScanned, totalUniverse } = JSON.parse(e.data);
-          setTopStatus(`${totalScanned} of ${totalUniverse} screened`);
-        } catch (_) {}
-        es.close();
-      });
-      es.onerror = () => { if (live) setTopStatus('Could not load top picks'); es.close(); };
-    } catch (_) {
-      if (live) setTopStatus('Could not load top picks');
-    }
+          mergeIntoPool(merged, 'auto');
+        };
  
-    return () => { live = false; es?.close(); };
+        // Run wave 1, then wave 2 in background — UI updates after each
+        await runWave(wave1);
+        if (live) setTopStatus(`${totalScanned} of ${totalUniverse} screened`);
+        runWave(wave2); // intentionally not awaited — updates picks when it lands
+      } catch (_) {
+        if (live) setTopStatus('Could not load top picks');
+      }
+    })();
+    return () => { live = false; };
   }, [mergeIntoPool]);
  
   // ── Signal retry — works for both top picks and custom results ─────────
