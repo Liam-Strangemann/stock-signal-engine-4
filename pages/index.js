@@ -138,20 +138,6 @@ function SkeletonCard() {
   );
 }
  
-// ── Source badge shown on top pick cards that came from a custom scan ──────────
-function SourceBadge({ source }) {
-  if (!source) return null;
-  return (
-    <span style={{
-      fontSize: 7.5, fontFamily: SANS, padding: '1px 5px', borderRadius: 2,
-      letterSpacing: '0.1em', textTransform: 'uppercase',
-      background: 'rgba(184,160,112,0.12)', color: C.gold,
-      border: '0.5px dashed rgba(184,160,112,0.4)', flexShrink: 0,
-    }}>
-      {source === 'custom' ? 'custom scan' : 'auto'}
-    </span>
-  );
-}
  
 function FeatureCard({ stock, rank, onSignalRetry }) {
   if (!stock) return <SkeletonCard/>;
@@ -176,7 +162,7 @@ function FeatureCard({ stock, rank, onSignalRetry }) {
             <span style={{ fontSize:8, fontFamily:SANS, fontWeight:600, padding:'2px 8px', borderRadius:20, letterSpacing:'0.06em', textTransform:'uppercase', background:rating.bg, color:rating.color, border:`0.5px solid ${rating.border}`, flexShrink:0 }}>
               {rating.label}
             </span>
-            <SourceBadge source={stock._source} />
+ 
           </div>
           <div style={{ fontSize:11, color:C.txLight, fontFamily:SANS }}>{stock.company||''}</div>
         </div>
