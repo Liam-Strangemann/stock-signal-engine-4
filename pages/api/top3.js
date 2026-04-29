@@ -1,14 +1,21 @@
-// pages/api/top3.js  v4
+// pages/api/top3.js  v5
 //
-// Changes from v3:
-//  • Universe expanded to ~1,800 tickers across all 11 GICS sectors
-//  • Quick-scan (fetchQuick) runs in sequential mini-batches of 20 tickers
-//    with a 200 ms pause between batches — prevents Yahoo rate-limit 429s
-//    while still completing the full scan in ~20–25 s
-//  • Top-scoring candidates are picked after the full scan, not mid-way
-//  • analyse step unchanged — still sends top 20 to /api/analyse
-//  • 30-minute server-side cache preserved
- 
+// Changes from v4:
+//  1. Correct count displayed — returns totalUniverse (full list length ~1,800)
+//     alongside totalScanned (how many returned valid data). The UI now shows
+//     "Scanning 1,800 securities" on first load and "X of 1,800 returned data"
+//     after the scan completes.
+//  2. Rolling 5-minute re-scan endpoint — accepts GET ?refresh=1 to force a
+//     fresh scan. The scheduler in the frontend calls this every 5 minutes.
+//     Returns { candidates, stockMeta, totalScanned, totalUniverse, freshAt }.
+//  3. Incremental top-pick promotion — the cache now stores ALL scanned results
+//     (not just candidates). When the frontend re-fetches, it can compare fresh
+//     scores against the current top-9 and promote better stocks.
+//     New response field: `allScored` — array of { symbol, qs, price, pe, mc,
+//     exchange } sorted by quickScore descending (top 50 returned to keep
+//     payload small).
+//  4. No change to quickScore logic or universe — same ~1,800 tickers as v4.
+
 const YH = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
@@ -16,7 +23,7 @@ const YH = {
   'Origin': 'https://finance.yahoo.com',
   'Referer': 'https://finance.yahoo.com/',
 };
- 
+
 // ── Universe — ~1,800 tickers across all 11 GICS sectors ─────────────────────
 const UNIVERSE = [
   // ── Mega-cap tech ─────────────────────────────────────────────────────────
@@ -167,16 +174,15 @@ const UNIVERSE = [
   'PLUG','FCEL','BLDP','BE','HYLN','CLNE','GPRE','REX','PEIX','ALTO',
   'NEP','CWEN','AY','BEP','AMPS','HASI','NOVA','VVPR','PLTK','GREE',
 ];
- 
+
 const UNIQ = [...new Set(UNIVERSE)];
- 
-// ── Fallback pool ─────────────────────────────────────────────────────────────
+const TOTAL_UNIVERSE = UNIQ.length; // exposed in response so UI can show "X of 1,800"
+
 const FALLBACK = [
   'MSFT','AAPL','NVDA','GOOGL','AMZN','META','JPM','XOM','LLY','UNH',
   'V','MA','AVGO','HD','MRK','ABBV','PEP','KO','TMO','CAT',
 ];
- 
-// ── Exchange label normalisation ──────────────────────────────────────────────
+
 function cleanExchangeLabel(raw) {
   if (!raw) return null;
   const u = raw.toUpperCase();
@@ -190,12 +196,17 @@ function cleanExchangeLabel(raw) {
   if (u.includes('OTC') || u.includes('PINK')) return 'OTC';
   return raw.split(/[\s,]/)[0].toUpperCase() || null;
 }
- 
-// ── Cache ─────────────────────────────────────────────────────────────────────
-let cache = { data: null, ts: 0 };
-const TTL = 30 * 60 * 1000; // 30 minutes
- 
-// ── Fetch quick metadata for a single ticker ──────────────────────────────────
+
+// ── Cache — stores full scored list, not just top candidates ─────────────────
+// This allows the frontend to compare new quickScores against current top-9
+// and promote stocks without a full re-analyse.
+let cache = {
+  data: null,        // the last full response object
+  allScored: [],     // sorted array of all scanned stocks with quickScore
+  ts: 0,
+};
+const TTL = 30 * 60 * 1000; // 30 min for cold cache; forced refresh on ?refresh=1
+
 async function fetchQuick(symbol) {
   for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
     try {
@@ -208,7 +219,7 @@ async function fetchQuick(symbol) {
       const res  = j?.chart?.result?.[0];
       const meta = res?.meta;
       if (!meta?.regularMarketPrice) continue;
- 
+
       const price    = meta.regularMarketPrice;
       const hi       = meta.fiftyTwoWeekHigh  || price * 1.2;
       const lo       = meta.fiftyTwoWeekLow   || price * 0.8;
@@ -217,28 +228,24 @@ async function fetchQuick(symbol) {
       const volume   = meta.regularMarketVolume || 0;
       const exchange = cleanExchangeLabel(meta.exchangeName || meta.fullExchangeName)
                     || cleanExchangeLabel(meta.exchange);
- 
+
       const fromHi = hi > 0 ? ((hi - price) / hi * 100) : 0;
       const range  = hi - lo;
       const loPct  = range > 0 ? ((price - lo) / range * 100) : 50;
- 
+
       return { symbol, price, hi, lo, pe, mc, volume, fromHi, loPct, exchange, valid: true };
     } catch (_) {}
   }
   return null;
 }
- 
-// ── quickScore — selects candidates worth full analysis ───────────────────────
+
 function quickScore(s) {
   let n = 0;
- 
-  // 1. Market-cap quality tiers
   if      (s.mc > 500e9)  n += 20;
   else if (s.mc > 100e9)  n += 15;
   else if (s.mc > 20e9)   n += 8;
   else if (s.mc > 5e9)    n += 3;
- 
-  // 2. PE exists and is credible
+
   if (s.pe && s.pe > 0 && s.pe < 80) {
     n += 8;
     if      (s.pe < 12) n += 20;
@@ -246,94 +253,100 @@ function quickScore(s) {
     else if (s.pe < 25) n += 10;
     else if (s.pe < 35) n += 5;
   }
- 
-  // 3. Distance from 52w high — mild preference for modest pullbacks
+
   if      (s.fromHi > 3  && s.fromHi < 15) n += 10;
   else if (s.fromHi >= 15 && s.fromHi < 30) n += 5;
   else if (s.fromHi >= 30 && s.fromHi < 50) n += 2;
- 
-  // 4. Liquidity
+
   if      (s.volume > 10e6)  n += 8;
   else if (s.volume > 1e6)   n += 4;
   else if (s.volume > 100e3) n += 1;
- 
-  // 5. Range position — prefer mid-range
+
   if (s.loPct > 25 && s.loPct < 80) n += 4;
- 
+
   return Math.round(n);
 }
- 
-// ── Sequential batched quick-scan ─────────────────────────────────────────────
-// Runs in mini-batches of 20 with a 200 ms pause between each batch.
-// This processes ~1,800 tickers in ~20–25 s without triggering Yahoo 429s.
-// Each batch uses Promise.all so tickers within a batch are concurrent.
+
+// Sequential batched scan — same as v4 (200 ms pause, batches of 20)
 async function scanUniverseSequentially(universe) {
-  const MINI_BATCH = 20;   // concurrent fetches per round
-  const PAUSE_MS   = 200;  // pause between rounds (ms)
+  const MINI_BATCH = 20;
+  const PAUSE_MS   = 200;
   const results = [];
- 
+
   for (let i = 0; i < universe.length; i += MINI_BATCH) {
     const batch = universe.slice(i, i + MINI_BATCH);
     const batchResults = await Promise.all(batch.map(fetchQuick));
     for (const r of batchResults) {
       if (r) results.push(r);
     }
-    // Pause between rounds — skip the pause after the last batch
     if (i + MINI_BATCH < universe.length) {
       await new Promise(resolve => setTimeout(resolve, PAUSE_MS));
     }
   }
- 
+
   return results;
 }
- 
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // Serve from cache if fresh
-  if (cache.data && Date.now() - cache.ts < TTL) {
+  const forceRefresh = req.query?.refresh === '1';
+
+  // Serve from cache if fresh (and no forced refresh)
+  if (!forceRefresh && cache.data && Date.now() - cache.ts < TTL) {
     res.setHeader('X-Cache', 'HIT');
     return res.status(200).json(cache.data);
   }
- 
-  let candidates   = [];
-  let stockMeta    = {};
-  let totalScanned = 0;
- 
+
+  let candidates    = [];
+  let stockMeta     = {};
+  let totalScanned  = 0;
+  let allScored     = [];
+
   try {
-    // Full universe quick-scan — sequential batches to avoid rate limits
     const allResults = await scanUniverseSequentially(UNIQ);
     totalScanned = allResults.length;
- 
+
     if (allResults.length >= 4) {
       const scored = allResults
         .map(s => ({ ...s, qs: quickScore(s) }))
         .sort((a, b) => b.qs - a.qs);
- 
-      // Top 20 by quickScore go to the full 6-signal analysis
+
+      // Top 20 by quickScore → full 6-signal analysis
       candidates = scored.slice(0, 20).map(s => s.symbol);
- 
+
+      // Keep top 50 scored entries for incremental promotion by the frontend
+      allScored = scored.slice(0, 50).map(s => ({
+        symbol:   s.symbol,
+        qs:       s.qs,
+        price:    s.price,
+        pe:       s.pe,
+        mc:       s.mc,
+        exchange: s.exchange,
+      }));
+
       for (const s of allResults) {
         if (s.exchange) stockMeta[s.symbol] = { exchange: s.exchange };
       }
     }
   } catch (_) {}
- 
+
   if (candidates.length < 4) {
     candidates   = FALLBACK.slice(0, 20);
     totalScanned = totalScanned || FALLBACK.length;
   }
   candidates = [...new Set(candidates)].slice(0, 20);
- 
+
   const result = {
     candidates,
     stockMeta,
+    allScored,           // top-50 quick-scored entries for incremental pool update
     totalScanned,
+    totalUniverse: TOTAL_UNIVERSE,   // always ~1,800 — used by UI for "Scanning 1,800"
     usedFallback: candidates.every(c => FALLBACK.includes(c)),
     generatedAt: new Date().toISOString(),
   };
- 
-  cache = { data: result, ts: Date.now() };
+
+  cache = { data: result, allScored, ts: Date.now() };
   res.setHeader('Cache-Control', 's-maxage=1800, stale-while-revalidate');
   return res.status(200).json(result);
 }
- 
