@@ -1,5 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+// ── Inject Google Fonts into <head> the correct way ──────────────────────────
+// @import inside a <style> tag breaks if it's not the very first rule.
+// The only reliable approach in a plain React component (no Next.js Head)
+// is to append a <link> element to document.head at mount time.
+function useFonts() {
+  useEffect(() => {
+    const id = 'signal-engine-fonts';
+    if (document.getElementById(id)) return;
+    const link = document.createElement('link');
+    link.id   = id;
+    link.rel  = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400;500&display=swap';
+    document.head.appendChild(link);
+  }, []);
+}
+
 const PRESETS = {
   'Mega-cap':     'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH',
   'Technology':   'AAPL,MSFT,NVDA,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT',
@@ -44,7 +60,6 @@ function scoreColor(sc, dark = false) {
   if (sc === 3) return dark ? '#C8A870' : C.amber;
   return dark ? 'rgba(154,152,144,0.55)' : C.txLight;
 }
-
 function getRating(sc) {
   if (sc >= 6) return { label:'Strong Buy', color:'#14532d', bg:'#bbf7d0', border:'#6ee7a0' };
   if (sc === 5) return { label:'Strong Buy', color:'#166534', bg:'#dcfce7', border:'#86efac' };
@@ -53,16 +68,16 @@ function getRating(sc) {
   return               { label:'Ignore',     color:C.txLight,  bg:C.cardBg,  border:C.borderDk };
 }
 
-function ScoreDots({ score, max = 6, dark = false }) {
+function ScoreDots({ score, max=6, dark=false }) {
   const filledColor = scoreColor(score, dark);
   const emptyRing   = dark ? 'rgba(95,94,86,0.45)' : C.borderDk;
   return (
     <div style={{ display:'flex', gap:4 }}>
-      {Array.from({ length: max }).map((_, i) => (
+      {Array.from({ length:max }).map((_,i) => (
         <div key={i} style={{
           width:7, height:7, borderRadius:'50%',
-          background: i < score ? filledColor : 'transparent',
-          border:`1.5px solid ${i < score ? filledColor : emptyRing}`,
+          background: i<score ? filledColor : 'transparent',
+          border:`1.5px solid ${i<score ? filledColor : emptyRing}`,
           transition:'all 0.3s',
         }}/>
       ))}
@@ -71,24 +86,29 @@ function ScoreDots({ score, max = 6, dark = false }) {
 }
 
 function SigPill({ sig, label, dark=false, signalIndex, onRetry, loading=false }) {
-  const hasVal = !loading && sig.value && sig.value !== '--' && sig.value !== 'No data';
+  // "Loading…" means pass-2 is in-flight — show spinner, not retry
+  const isLoading = loading || sig.value === 'Loading…';
+  const hasVal    = !isLoading && sig.value && sig.value !== '--' && sig.value !== 'No data';
   const p = sig.status === 'pass', f = sig.status === 'fail';
-  const bg  = !hasVal && !loading ? (dark?C.dkAmberBg:C.amberBg) : dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
-  const col = !hasVal && !loading ? (dark?C.dkAmber:C.amber) : dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
-  const bdc = !hasVal && !loading ? (dark?C.dkAmberBd:C.amberBd) : dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
-  const bd  = !hasVal && !loading ? `0.5px dashed ${bdc}` : `0.5px solid ${bdc}`;
-  const clickable = !hasVal && !loading && onRetry;
+
+  const bg  = !hasVal && !isLoading ? (dark?C.dkAmberBg:C.amberBg) : dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
+  const col = !hasVal && !isLoading ? (dark?C.dkAmber:C.amber)     : dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
+  const bdc = !hasVal && !isLoading ? (dark?C.dkAmberBd:C.amberBd) : dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
+  const bd  = !hasVal && !isLoading ? `0.5px dashed ${bdc}` : `0.5px solid ${bdc}`;
+  const clickable = !hasVal && !isLoading && onRetry;
+
   return (
-    <div onClick={clickable?()=>onRetry(signalIndex):undefined} title={clickable?`Click to retry ${label}`:undefined}
+    <div onClick={clickable?()=>onRetry(signalIndex):undefined}
+      title={clickable?`Click to retry ${label}`:undefined}
       style={{ background:bg, border:bd, borderRadius:5, padding:'5px 7px', cursor:clickable?'pointer':'default' }}>
       <div style={{ display:'flex', alignItems:'center', gap:4, marginBottom:3 }}>
-        {loading
+        {isLoading
           ? <div style={{ width:7,height:7,borderRadius:'50%',border:`1.5px solid ${col}`,borderTopColor:'transparent',flexShrink:0,animation:'spin 0.7s linear infinite' }}/>
           : <div style={{ width:4,height:4,borderRadius:'50%',background:col,flexShrink:0 }}/>}
         <div style={{ fontSize:7.5,color:dark?'rgba(154,152,144,0.75)':C.txLight,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.06em',lineHeight:1 }}>{label}</div>
       </div>
       <div style={{ fontSize:10,fontWeight:500,color:col,fontFamily:MONO,lineHeight:1.3,wordBreak:'break-word' }}>
-        {loading?'fetching…':!hasVal?'no data, tap to retry':sig.value}
+        {isLoading ? 'loading…' : !hasVal ? 'no data — tap to retry' : sig.value}
       </div>
     </div>
   );
@@ -165,7 +185,6 @@ function ArrowBtn({ dir, onClick, disabled }) {
     </button>
   );
 }
-
 function PageDots({ total, active, onChange }) {
   return (
     <div style={{ display:'flex',gap:6,alignItems:'center' }}>
@@ -176,7 +195,6 @@ function PageDots({ total, active, onChange }) {
     </div>
   );
 }
-
 function ResultCard({ stock, rank, onSignalRetry }) {
   const sc=Math.min(stock.score||0,6), rating=getRating(sc);
   const chgPos=stock.change?.startsWith('+');
@@ -220,22 +238,65 @@ function ResultCard({ stock, rank, onSignalRetry }) {
   );
 }
 
+// ── Two-pass analyse helper ───────────────────────────────────────────────────
+// Pass 1: fast partial data — renders in ~2–3s
+// Pass 2: slow sources (insider, target, peer PE) — fills remaining pills
+async function analysePass1(tickers) {
+  const res = await fetch('/api/analyse', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ tickers, pass:1 }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+async function analysePass2(tickers, pass1Results) {
+  const res = await fetch('/api/analyse', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ tickers, pass:2, pass1Results }),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ── Merge pass-2 enrichment into a stock record ──────────────────────────────
+function applyEnrichment(stock, enrichment) {
+  if (!enrichment || !stock) return stock;
+  const signals = [...(stock.signals || Array(6).fill({ status:'neutral', value:'No data' }))];
+  if (enrichment.s4) signals[3] = enrichment.s4;
+  if (enrichment.s5) signals[4] = enrichment.s5;
+  if (enrichment.s6) signals[5] = enrichment.s6;
+  const score = signals.filter(s => s.status === 'pass').length;
+  // Build simple summary
+  const NAMES = ['EPS beat','Low PE','Below 50d MA','Insider buying','Analyst upside','PE vs peers'];
+  const passes = signals.map((s,i)=>s.status==='pass'?NAMES[i]:null).filter(Boolean);
+  const fails  = signals.map((s,i)=>s.status==='fail'?NAMES[i]:null).filter(Boolean);
+  let summary = stock.summary;
+  if (score>=5) summary=`Strong value candidate — ${score}/6 signals pass. Strengths: ${passes.join(', ')}.`;
+  else if(score===4) summary=`Good signals (4/6). Passes: ${passes.join(', ')}.`;
+  else if(score===3) summary=`Moderate signals (3/6). Passes: ${passes.join(', ')}.`;
+  else if(score>0)   summary=`Weak signals (${score}/6). Fails: ${fails.join(', ')}.`;
+  else               summary=`No signals pass. Fails: ${fails.join(', ')}.`;
+  return { ...stock, signals, score, summary, updatedAt: new Date().toISOString() };
+}
+
 export default function Home() {
-  const [input,setInput]             = useState('');
-  const [results,setResults]         = useState([]);
-  const [scanning,setScanning]       = useState(false);
-  const [status,setStatus]           = useState('');
-  const [filter,setFilter]           = useState('all');
-  const [updatedAt,setUpdatedAt]     = useState('');
+  useFonts();
+
+  const [input,setInput]               = useState('');
+  const [results,setResults]           = useState([]);
+  const [scanning,setScanning]         = useState(false);
+  const [status,setStatus]             = useState('');
+  const [filter,setFilter]             = useState('all');
+  const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
-  const [topPicks,setTopPicks]       = useState(Array(TOTAL_PICKS).fill(null));
-  const [topStatus,setTopStatus]     = useState('');
-  const [totalUniverse,setTotalUniverse] = useState(1800);
-  const [newlyPromoted,setNewlyPromoted] = useState(new Set());
+  const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
+  const [topStatus,setTopStatus]       = useState('');
+  const [totalUniverse,setTotalUniverse]= useState(1800);
+  const [newlyPromoted,setNewlyPromoted]= useState(new Set());
   const [carouselPage,setCarouselPage] = useState(0);
-  const [transitioning,setTransitioning] = useState(false);
-  const [animPhase,setAnimPhase]     = useState('idle');
-  const [rescanCountdown,setRescanCountdown] = useState('');
+  const [transitioning,setTransitioning]=useState(false);
+  const [animPhase,setAnimPhase]       = useState('idle');
+  const [rescanCountdown,setRescanCountdown]= useState('');
 
   const timerRef       = useRef(null);
   const rescanTimerRef = useRef(null);
@@ -244,152 +305,222 @@ export default function Home() {
   const allStocksRef   = useRef(new Map());
   const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
 
-  const recomputeTopPicks = useCallback((promoted=new Set()) => {
-    const all = Array.from(allStocksRef.current.values())
+  const recomputeTopPicks = useCallback((promoted=new Set())=>{
+    const all=Array.from(allStocksRef.current.values())
       .filter(s=>s&&!s.error&&s.score!=null)
-      .sort((a,b)=>{
-        const sd=(b.score||0)-(a.score||0);
-        return sd!==0?sd:new Date(b.updatedAt||0)-new Date(a.updatedAt||0);
-      });
+      .sort((a,b)=>{const sd=(b.score||0)-(a.score||0);return sd!==0?sd:new Date(b.updatedAt||0)-new Date(a.updatedAt||0);});
     setTopPicks(Array(TOTAL_PICKS).fill(null).map((_,i)=>all[i]||null));
-    if (promoted.size>0) setNewlyPromoted(promoted);
+    if(promoted.size>0) setNewlyPromoted(promoted);
   },[]);
 
-  const mergeIntoPool = useCallback((stockMap,source,promoted=new Set())=>{
-    for (const [ticker,stock] of Object.entries(stockMap)) {
-      if (!stock||stock.error) continue;
+  const mergeIntoPool=useCallback((stockMap,source,promoted=new Set())=>{
+    for(const [ticker,stock] of Object.entries(stockMap)){
+      if(!stock||stock.error) continue;
       const ex=allStocksRef.current.get(ticker);
-      if (!ex||(stock.score??0)>=(ex.score??0)) allStocksRef.current.set(ticker,{...stock,_source:source});
+      if(!ex||(stock.score??0)>=(ex.score??0)) allStocksRef.current.set(ticker,{...stock,_source:source});
     }
     recomputeTopPicks(promoted);
   },[recomputeTopPicks]);
 
-  const updateStockInPool = useCallback((ticker,updater)=>{
+  const updateStockInPool=useCallback((ticker,updater)=>{
     const ex=allStocksRef.current.get(ticker);
-    if (ex) { allStocksRef.current.set(ticker,updater(ex)); recomputeTopPicks(); }
+    if(ex){allStocksRef.current.set(ticker,updater(ex));recomputeTopPicks();}
   },[recomputeTopPicks]);
 
-  const goToPage = useCallback((nextPage)=>{
-    if (transitioning||nextPage===carouselPage) return;
-    setTransitioning(true); setAnimPhase('exit');
-    setTimeout(()=>{ setCarouselPage(nextPage); setAnimPhase('enter'); setTimeout(()=>{ setAnimPhase('idle'); setTransitioning(false); },150); },100);
+  const goToPage=useCallback((nextPage)=>{
+    if(transitioning||nextPage===carouselPage) return;
+    setTransitioning(true);setAnimPhase('exit');
+    setTimeout(()=>{setCarouselPage(nextPage);setAnimPhase('enter');setTimeout(()=>{setAnimPhase('idle');setTransitioning(false);},150);},100);
   },[transitioning,carouselPage]);
 
-  const prevPage = useCallback(()=>{ if(carouselPage>0) goToPage(carouselPage-1); },[carouselPage,goToPage]);
-  const nextPage = useCallback(()=>{ if(carouselPage<totalPages-1) goToPage(carouselPage+1); },[carouselPage,totalPages,goToPage]);
+  const prevPage=useCallback(()=>{if(carouselPage>0)goToPage(carouselPage-1);},[carouselPage,goToPage]);
+  const nextPage=useCallback(()=>{if(carouselPage<totalPages-1)goToPage(carouselPage+1);},[carouselPage,totalPages,goToPage]);
 
   useEffect(()=>{
-    const h=(e)=>{ if(e.target.tagName==='INPUT') return; if(e.key==='ArrowRight') nextPage(); if(e.key==='ArrowLeft') prevPage(); };
-    window.addEventListener('keydown',h); return ()=>window.removeEventListener('keydown',h);
+    const h=e=>{if(e.target.tagName==='INPUT')return;if(e.key==='ArrowRight')nextPage();if(e.key==='ArrowLeft')prevPage();};
+    window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
   },[nextPage,prevPage]);
 
-  const runRollingRescan = useCallback(async()=>{
+  // ── Two-pass scan ──────────────────────────────────────────────────────────
+  // Returns pass-1 results immediately so cards render at once,
+  // then fires pass-2 to fill the slow pills (insider, analyst, peer PE).
+  const twoPassScan = useCallback(async(tickers, source='custom', onPass1Done=null)=>{
+    // PASS 1 — fast
+    let pass1Data;
+    try { pass1Data = await analysePass1(tickers); } catch(e) { return null; }
+    const p1Results = pass1Data?.results || {};
+
+    if(onPass1Done) onPass1Done(p1Results);
+
+    // PASS 2 — slow sources, fire immediately after pass 1 returns
     try {
+      const p2Data = await analysePass2(tickers, p1Results);
+      if(!p2Data?.results) return p1Results;
+      // Merge enrichment into each stock
+      const enriched = {};
+      for(const ticker of tickers){
+        const base = p1Results[ticker];
+        const enrich = p2Data.results[ticker];
+        enriched[ticker] = applyEnrichment(base, enrich);
+      }
+      return enriched;
+    } catch(_){ return p1Results; }
+  },[]);
+
+  const runRollingRescan = useCallback(async()=>{
+    try{
       setTopStatus('Re-scanning universe…');
       const sr=await fetch('/api/top3?refresh=1');
-      if (!sr.ok) return;
+      if(!sr.ok) return;
       const {candidates,allScored=[],stockMeta={},totalUniverse:tu}=await sr.json();
-      if (tu) setTotalUniverse(tu);
+      if(tu) setTotalUniverse(tu);
       const pool=allStocksRef.current;
-      const newC=(allScored||[]).filter(s=>{ const ex=pool.get(s.symbol); return !ex||s.qs>(ex._qs||0); }).slice(0,3).map(s=>s.symbol);
-      if (!newC.length) { setTopStatus(`${(tu||totalUniverse).toLocaleString()} securities screened`); return; }
+      const newC=(allScored||[]).filter(s=>{const ex=pool.get(s.symbol);return !ex||s.qs>(ex._qs||0);}).slice(0,3).map(s=>s.symbol);
+      if(!newC.length){setTopStatus(`${(tu||totalUniverse).toLocaleString()} securities screened`);return;}
       setTopStatus(`Analysing ${newC.length} new candidates…`);
-      const ar=await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers:newC})});
-      if (!ar.ok) return;
-      const {results:res}=await ar.json();
+
+      const enriched = await twoPassScan(newC, 'auto',
+        (p1)=>{
+          // After pass 1: pre-merge so cards appear quickly
+          for(const [ticker,stock] of Object.entries(p1)){
+            if(!stock||stock.error) continue;
+            const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
+            pool.set(ticker,{...stock,_qs:qs,_source:'auto',...(stockMeta[ticker]?.exchange?{exchange:stockMeta[ticker].exchange}:{})});
+          }
+          recomputeTopPicks();
+        }
+      );
+      if(!enriched) return;
+
       const top9=Array.from(pool.values()).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0)).slice(0,TOTAL_PICKS);
       const worstScore=top9.length>=TOTAL_PICKS?(top9[TOTAL_PICKS-1]?.score||0):0;
       const promoted=new Set();
-      for (const [ticker,stock] of Object.entries(res||{})) {
-        if (!stock||stock.error) continue;
+      for(const [ticker,stock] of Object.entries(enriched)){
+        if(!stock||stock.error) continue;
         const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
-        if ((stock.score||0)>worstScore) promoted.add(ticker);
+        if((stock.score||0)>worstScore) promoted.add(ticker);
         pool.set(ticker,{...stock,_qs:qs,_source:'auto',...(stockMeta[ticker]?.exchange?{exchange:stockMeta[ticker].exchange}:{})});
       }
       recomputeTopPicks(promoted);
       setTopStatus(`${(tu||totalUniverse).toLocaleString()} securities screened · refreshed ${new Date().toLocaleTimeString()}`);
-    } catch(_) { setTopStatus(`${totalUniverse.toLocaleString()} securities screened`); }
-  },[recomputeTopPicks,totalUniverse]);
+    }catch(_){setTopStatus(`${totalUniverse.toLocaleString()} securities screened`);}
+  },[recomputeTopPicks,totalUniverse,twoPassScan]);
 
+  // ── Auto top-picks on mount ───────────────────────────────────────────────
   useEffect(()=>{
     let live=true;
     setTopStatus('Scanning ~1,800 securities…');
     (async()=>{
-      try {
+      try{
         const sr=await fetch('/api/top3');
-        if (!live||!sr.ok) { if(live) setTopStatus('Could not load top picks'); return; }
+        if(!live||!sr.ok){if(live)setTopStatus('Could not load top picks');return;}
         const {candidates,totalScanned,totalUniverse:tu,stockMeta={},allScored=[]}=await sr.json();
-        if (tu) setTotalUniverse(tu);
-        if (!live||!candidates?.length) { if(live) setTopStatus('No candidates found'); return; }
-        setTopStatus(`Analysing top ${candidates.length} picks from ${(tu||1800).toLocaleString()} securities…`);
-        const ar=await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers:candidates})});
-        if (!live||!ar.ok) { if(live) setTopStatus('Analysis failed'); return; }
-        const {results:res}=await ar.json();
-        if (!live) return;
-        const merged=Object.fromEntries(Object.entries(res||{}).map(([ticker,stock])=>{
-          if (!stock) return [ticker,stock];
-          const exchange=(stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL')?stock.exchange:(stockMeta[ticker]?.exchange||stock.exchange);
-          const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
-          return [ticker,{...stock,exchange,_qs:qs}];
-        }));
-        mergeIntoPool(merged,'auto');
-        setTopStatus(`${(tu||totalScanned||candidates.length).toLocaleString()} of ${(tu||1800).toLocaleString()} securities screened`);
-      } catch(_) { if(live) setTopStatus('Could not load top picks'); }
+        if(tu) setTotalUniverse(tu);
+        if(!live||!candidates?.length){if(live)setTopStatus('No candidates found');return;}
+        setTopStatus(`Loading ${candidates.length} top picks…`);
+
+        // Pass 1 — render cards immediately with partial data
+        let p1Results = {};
+        try{
+          const p1=await analysePass1(candidates);
+          if(!live) return;
+          p1Results=p1?.results||{};
+          const merged=Object.fromEntries(Object.entries(p1Results).map(([ticker,stock])=>{
+            if(!stock) return[ticker,stock];
+            const exchange=(stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL')?stock.exchange:(stockMeta[ticker]?.exchange||stock.exchange);
+            const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
+            return[ticker,{...stock,exchange,_qs:qs}];
+          }));
+          mergeIntoPool(merged,'auto');
+          // Show count now — cards are already visible
+          setTopStatus(`${(tu||totalScanned||candidates.length).toLocaleString()} of ${(tu||1800).toLocaleString()} securities screened`);
+        }catch(_){}
+
+        // Pass 2 — enrich pills in the background
+        try{
+          const p2=await analysePass2(candidates,p1Results);
+          if(!live||!p2?.results) return;
+          for(const [ticker,enrich] of Object.entries(p2.results)){
+            updateStockInPool(ticker, stock=>applyEnrichment(stock,enrich)||stock);
+            // Also update exchange metadata
+            if(stockMeta[ticker]?.exchange){
+              updateStockInPool(ticker, stock=>({...stock,exchange:stockMeta[ticker].exchange}));
+            }
+          }
+        }catch(_){}
+      }catch(_){if(live)setTopStatus('Could not load top picks');}
     })();
-    rescanTimerRef.current=setInterval(()=>{ if(live) runRollingRescan(); },RESCAN_INTERVAL_MS);
+    rescanTimerRef.current=setInterval(()=>{if(live)runRollingRescan();},RESCAN_INTERVAL_MS);
     rescanStartRef.current=Date.now();
-    return ()=>{ live=false; clearInterval(rescanTimerRef.current); };
-  },[mergeIntoPool,runRollingRescan]);
+    return()=>{live=false;clearInterval(rescanTimerRef.current);};
+  },[mergeIntoPool,updateStockInPool,runRollingRescan]);
 
   useEffect(()=>{
-    if (newlyPromoted.size===0) return;
+    if(newlyPromoted.size===0) return;
     const t=setTimeout(()=>setNewlyPromoted(new Set()),30000);
-    return ()=>clearTimeout(t);
+    return()=>clearTimeout(t);
   },[newlyPromoted]);
 
   useEffect(()=>{
     const tick=setInterval(()=>{
       const remaining=RESCAN_INTERVAL_MS-((Date.now()-rescanStartRef.current)%RESCAN_INTERVAL_MS);
-      const m=Math.floor(remaining/60000), s=Math.floor((remaining%60000)/1000);
+      const m=Math.floor(remaining/60000),s=Math.floor((remaining%60000)/1000);
       setRescanCountdown(`next rescan ${m}:${String(s).padStart(2,'0')}`);
     },1000);
-    return ()=>clearInterval(tick);
+    return()=>clearInterval(tick);
   },[]);
 
-  const retrySignal = useCallback(async(ticker,signalIndex)=>{
+  // ── Signal retry ──────────────────────────────────────────────────────────
+  const retrySignal=useCallback(async(ticker,signalIndex)=>{
     const markLoad=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:'No data'}))];sigs[signalIndex]={...(sigs[signalIndex]||{}),_loading:true};return{...s,signals:sigs};};
-    updateStockInPool(ticker,markLoad); setResults(prev=>prev.map(s=>s?.ticker===ticker?markLoad(s):s));
-    try {
+    updateStockInPool(ticker,markLoad);setResults(prev=>prev.map(s=>s?.ticker===ticker?markLoad(s):s));
+    try{
       const res=await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers:[ticker]})});
-      const data=await res.json(); const fresh=data?.results?.[ticker];
+      const data=await res.json();const fresh=data?.results?.[ticker];
       let ns=fresh?.signals?.[signalIndex]||{status:'neutral',value:'No data'};
-      if (signalIndex===3&&(!ns.value||ns.value==='No data'||ns.value==='No activity (30d)')) ns={status:'neutral',value:'No recent insider transactions'};
+      if(signalIndex===3&&(!ns.value||ns.value==='No data'||ns.value==='No activity (30d)')) ns={status:'neutral',value:'No recent insider transactions'};
       const apply=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:'No data'}))];sigs[signalIndex]={...ns,_loading:false};return{...s,signals:sigs,score:sigs.filter(x=>x.status==='pass').length};};
-      updateStockInPool(ticker,apply); setResults(prev=>prev.map(s=>s?.ticker===ticker?apply(s):s));
-    } catch(_) {
+      updateStockInPool(ticker,apply);setResults(prev=>prev.map(s=>s?.ticker===ticker?apply(s):s));
+    }catch(_){
       const clear=s=>{const sigs=[...(s.signals||[])];if(sigs[signalIndex])sigs[signalIndex]={...sigs[signalIndex],_loading:false};return{...s,signals:sigs};};
-      updateStockInPool(ticker,clear); setResults(prev=>prev.map(s=>s?.ticker===ticker?clear(s):s));
+      updateStockInPool(ticker,clear);setResults(prev=>prev.map(s=>s?.ticker===ticker?clear(s):s));
     }
   },[updateStockInPool]);
 
+  // ── Custom scan — also two-pass ───────────────────────────────────────────
   const scan=useCallback(async(tickers)=>{
-    setScanning(true); setStatus(`Analysing ${tickers.length} securities…`);
-    try {
-      const res=await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers})});
-      if (!res.ok){const e=await res.json();throw new Error(e.error||`HTTP ${res.status}`);}
-      const data=await res.json();
-      const arr=Object.values(data.results).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
-      setResults(arr); setUpdatedAt(new Date().toLocaleTimeString()); setStatus('');
-      mergeIntoPool(data.results,'custom');
-    } catch(e){setStatus(`Error: ${e.message}`);}
-    finally{setScanning(false);}
+    setScanning(true);setStatus(`Analysing ${tickers.length} securities…`);
+    try{
+      // Pass 1 — show cards fast
+      const p1=await analysePass1(tickers);
+      const p1Results=p1?.results||{};
+      const arr1=Object.values(p1Results).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
+      setResults(arr1);setUpdatedAt(new Date().toLocaleTimeString());setStatus('');setScanning(false);
+      mergeIntoPool(p1Results,'custom');
+
+      // Pass 2 — enrich in background, update results reactively
+      const p2=await analysePass2(tickers,p1Results);
+      if(!p2?.results) return;
+      setResults(prev=>prev.map(s=>{
+        const enrich=p2.results[s.ticker];
+        return applyEnrichment(s,enrich)||s;
+      }).sort((a,b)=>(b.score||0)-(a.score||0)));
+      mergeIntoPool(
+        Object.fromEntries(Object.entries(p2.results).map(([ticker,enrich])=>{
+          const base=p1Results[ticker];
+          return [ticker, applyEnrichment(base,enrich)||base];
+        })), 'custom'
+      );
+      setUpdatedAt(new Date().toLocaleTimeString());
+    }catch(e){setStatus(`Error: ${e.message}`);setScanning(false);}
   },[mergeIntoPool]);
 
   function runScan(){
     const tickers=input.split(/[\s,;]+/).map(t=>t.toUpperCase().trim()).filter(Boolean).slice(0,20);
-    if (!tickers.length) return;
-    tickersRef.current=tickers; clearInterval(timerRef.current); setResults([]);
-    scan(tickers); timerRef.current=setInterval(()=>scan(tickersRef.current),5*60*1000);
+    if(!tickers.length) return;
+    tickersRef.current=tickers;clearInterval(timerRef.current);setResults([]);
+    scan(tickers);
+    timerRef.current=setInterval(()=>scan(tickersRef.current),5*60*1000);
   }
   useEffect(()=>()=>clearInterval(timerRef.current),[]);
 
@@ -410,8 +541,7 @@ export default function Home() {
     <div style={{ background:C.pageBg,minHeight:'100vh',color:C.tx,fontFamily:SANS }}>
       <style>{`
         *{box-sizing:border-box;margin:0;padding:0;}
-        html{-webkit-font-smoothing:antialiased;}
-        body{background:${C.pageBg};}
+        html,body{-webkit-font-smoothing:antialiased;background:${C.pageBg};}
         ::selection{background:${C.gold};color:#2C2C2A;}
         input::placeholder{color:${C.txLight};}
         input:focus{outline:none;}
@@ -422,7 +552,6 @@ export default function Home() {
         @keyframes fadeUpNew{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
         @keyframes shimmer{0%,100%{opacity:0.5}50%{opacity:0.85}}
         @keyframes spin{to{transform:rotate(360deg)}}
-        @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400;500&display=swap');
       `}</style>
 
       {/* Header */}
