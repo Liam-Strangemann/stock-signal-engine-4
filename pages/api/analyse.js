@@ -165,9 +165,9 @@ function fmt$M(n) {
 }
 function fmtSh(n) {
   if (!n || n <= 0) return '';
-  if (n >= 1e6) return `${(n/1e6).toFixed(1)}M shs`;
-  if (n >= 1e3) return `${(n/1e3).toFixed(0)}K shs`;
-  return `${Math.round(n).toLocaleString()} shs`;
+  if (n >= 1e6) return `${(n/1e6).toFixed(1)}M shares`;
+  if (n >= 1e3) return `${(n/1e3).toFixed(0)}K shares`;
+  return `${Math.round(n).toLocaleString()} shares`;
 }
 function timeAgo(ds) {
   if (!ds) return '';
@@ -192,11 +192,12 @@ function getRating(s) {
 }
 
 // ─── Main: analyse one ticker ─────────────────────────────────────────────────
-async function analyseTicker(ticker) {
+// preloadedMetric: already-fetched /stock/metric result (from handler batch pre-fetch)
+// batchPECache: { TICKER: pe } for all tickers in this request + universe scan data
+async function analyseTicker(ticker, preloadedMetric = null, batchPECache = {}) {
 
-  // Fire ALL sources concurrently
+  // Fire remaining sources concurrently (metric already fetched by handler)
   const [
-    metricR,      // Finnhub /stock/metric — PE, EPS, 52w, MA50, marketCap
     quoteR,       // Finnhub /quote — live price, change
     profileR,     // Finnhub /stock/profile2 — name, exchange, marketCap
     earningsR,    // Finnhub /stock/earnings — EPS actual vs estimate
@@ -205,7 +206,6 @@ async function analyseTicker(ticker) {
     insidFhR,     // Finnhub insider
     chartR,       // Yahoo chart — closes for MA50 + 52w range
   ] = await Promise.allSettled([
-    fh(`/stock/metric?symbol=${ticker}&metric=all`, 6000),
     fh(`/quote?symbol=${ticker}`, 4000),
     fh(`/stock/profile2?symbol=${ticker}`, 4000),
     fh(`/stock/earnings?symbol=${ticker}&limit=4`, 5000),
@@ -215,7 +215,7 @@ async function analyseTicker(ticker) {
     yhChart(ticker, 6000),
   ]);
 
-  const metric  = metricR.status  === 'fulfilled' ? metricR.value  : null;
+  const metric  = preloadedMetric || null;  // already fetched by handler
   const quote   = quoteR.status   === 'fulfilled' ? quoteR.value   : null;
   const profile = profileR.status === 'fulfilled' ? profileR.value : null;
   const earnings= earningsR.status=== 'fulfilled' ? earningsR.value: null;
@@ -301,35 +301,46 @@ async function analyseTicker(ticker) {
   // ── Signal 3: Price vs 50d MA ─────────────────────────────────────────────
   let s3 = { status:'neutral', value:'No MA data' };
   try {
-    // PRIMARY: compute directly from Yahoo chart closes (always have this from chartR)
-    // This is more reliable than the Finnhub metric field name which varies
-    const closes = chart?.indicators?.quote?.[0]?.close || [];
-    let ma50 = computeMA50(closes);
-    // SUPPLEMENT: Finnhub metric field (try several known field names)
-    if (!ma50 || ma50 <= 0) {
-      ma50 = m['50DayMovingAverage'] || m['10DayAverageTradingVolume']
-        ? m['50DayMovingAverage'] || 0
-        : 0;
+    const closes = (chart?.indicators?.quote?.[0]?.close || []).filter(c => c != null && c > 0 && !isNaN(c));
+
+    // Compute MA from closes — use as many bars as we have, minimum 5
+    let ma50 = null, maLabel = '50d';
+    if (closes.length >= 50) {
+      const sl = closes.slice(-50);
+      ma50 = sl.reduce((a,b) => a+b, 0) / sl.length;
+      maLabel = '50d';
+    } else if (closes.length >= 20) {
+      const sl = closes.slice(-20);
+      ma50 = sl.reduce((a,b) => a+b, 0) / sl.length;
+      maLabel = '20d';
+    } else if (closes.length >= 5) {
+      ma50 = closes.reduce((a,b) => a+b, 0) / closes.length;
+      maLabel = `${closes.length}d`;
     }
-    // LAST RESORT: Yahoo chart meta has fiftyDayAverage
+
+    // Supplement: Finnhub metric field names for MA
     if (!ma50 || ma50 <= 0) {
-      ma50 = chart?.meta?.fiftyDayAverage || 0;
+      ma50 = m['50DayMovingAverage'] || chart?.meta?.fiftyDayAverage || 0;
+      maLabel = '50d';
     }
-    if (ma50 > 0) {
+
+    if (ma50 && ma50 > 0) {
       const pct = ((price - ma50) / ma50 * 100).toFixed(1);
       s3 = price <= ma50
-        ? { status:'pass', value:`$${price.toFixed(2)} ≤ 50d MA $${ma50.toFixed(2)} (${pct}%)` }
-        : { status:'fail', value:`$${price.toFixed(2)} > 50d MA $${ma50.toFixed(2)} (+${pct}%)` };
+        ? { status:'pass', value:`$${price.toFixed(2)} ≤ ${maLabel} MA $${ma50.toFixed(2)} (${pct}%)` }
+        : { status:'fail', value:`$${price.toFixed(2)} > ${maLabel} MA $${ma50.toFixed(2)} (+${pct}%)` };
     } else {
-      // Still show something useful: price vs 20d avg if we have closes
-      const ma20 = closes.length >= 5 ? computeMA50(closes.slice(-20)) : 0;
-      if (ma20 > 0) {
-        const pct = ((price - ma20) / ma20 * 100).toFixed(1);
-        s3 = price <= ma20
-          ? { status:'pass', value:`$${price.toFixed(2)} ≤ 20d MA $${ma20.toFixed(2)} (${pct}%)` }
-          : { status:'fail', value:`$${price.toFixed(2)} > 20d MA $${ma20.toFixed(2)} (+${pct}%)` };
+      // Absolute last resort: show price vs 52w midpoint as a proxy
+      const hi52 = m['52WeekHigh'] || chart?.meta?.fiftyTwoWeekHigh || 0;
+      const lo52 = m['52WeekLow']  || chart?.meta?.fiftyTwoWeekLow  || 0;
+      if (hi52 > 0 && lo52 > 0) {
+        const mid = (hi52 + lo52) / 2;
+        const pct = ((price - mid) / mid * 100).toFixed(1);
+        s3 = price <= mid
+          ? { status:'pass', value:`$${price.toFixed(2)} ≤ 52w mid $${mid.toFixed(2)} (${pct}%)` }
+          : { status:'fail', value:`$${price.toFixed(2)} > 52w mid $${mid.toFixed(2)} (+${pct}%)` };
       } else {
-        s3 = { status:'neutral', value:`Price $${price.toFixed(2)} (MA data loading)` };
+        s3 = { status:'neutral', value:`Price $${price.toFixed(2)} — chart unavailable` };
       }
     }
   } catch (_) {}
@@ -358,27 +369,26 @@ async function analyseTicker(ticker) {
     }
   } catch (_) {}
 
-  // ── Signal 5: Analyst target — always show $ upside % ────────────────────
-  let s5 = { status:'neutral', value:'No analyst data' };
+  // ── Signal 5: Analyst target — show $ target + % upside ──────────────────
+  let s5 = { status:'neutral', value:'No analyst coverage' };
   try {
-    // Finnhub price-target: targetMedian, targetMean, targetHigh, targetLow
     let tgtMedian = target?.targetMedian || target?.targetMean || 0;
     const tgtHigh = target?.targetHigh || 0;
     const tgtLow  = target?.targetLow  || 0;
 
-    // If Finnhub target missing, try Yahoo chart meta (sometimes has targetMeanPrice)
-    if (!tgtMedian && chart?.meta?.targetMeanPrice) {
+    // Supplement: Yahoo chart meta occasionally carries targetMeanPrice
+    if (!tgtMedian && chart?.meta?.targetMeanPrice > 0) {
       tgtMedian = chart.meta.targetMeanPrice;
     }
 
     if (tgtMedian > 0 && price > 0) {
       const upPct = ((tgtMedian - price) / price * 100);
       const upStr = `${upPct >= 0 ? '+' : ''}${upPct.toFixed(1)}%`;
-      // Show range if available
       const range = tgtLow > 0 && tgtHigh > 0
-        ? ` (range $${tgtLow.toFixed(0)}–$${tgtHigh.toFixed(0)})`
+        ? ` ($${tgtLow.toFixed(0)}–$${tgtHigh.toFixed(0)})`
         : '';
-      if (upPct >= 20) {
+      // Hard threshold: 25% upside = pass
+      if (upPct >= 25) {
         s5 = { status:'pass',    value:`Target $${tgtMedian.toFixed(2)}, ${upStr} upside${range}` };
       } else if (upPct >= 0) {
         s5 = { status:'neutral', value:`Target $${tgtMedian.toFixed(2)}, ${upStr} upside${range}` };
@@ -386,7 +396,7 @@ async function analyseTicker(ticker) {
         s5 = { status:'fail',    value:`Target $${tgtMedian.toFixed(2)}, ${upStr} downside${range}` };
       }
     } else {
-      // Fallback: recommendation counts — show as "X% buy rating"
+      // No price target — show buy/hold/sell ratio as fallback
       const recs = Array.isArray(rec) ? rec : [];
       const latest = recs[0];
       if (latest) {
@@ -398,7 +408,7 @@ async function analyseTicker(ticker) {
           const pct = Math.round(buy / total * 100);
           s5 = {
             status: pct >= 60 ? 'pass' : pct >= 35 ? 'neutral' : 'fail',
-            value: `${pct}% analyst buy (${buy}B / ${hold}H / ${sell}S)`,
+            value: `${pct}% buy rating (${buy}B / ${hold}H / ${sell}S)`,
           };
         } else {
           s5 = { status:'neutral', value:'No analyst coverage' };
@@ -409,55 +419,66 @@ async function analyseTicker(ticker) {
     }
   } catch (_) {}
 
-  // ── Signal 6: PE vs peers — dual source per peer ─────────────────────────
+  // ── Signal 6: PE vs peers — batch cache first, API fallback ──────────────
   let s6 = { status:'neutral', value:'No peer data' };
   try {
-    const curPE = m.peBasicExclExtraTTM || m.peTTM || (price > 0 ? price / (m.epsBasicExclExtraTTM || m.epsTTM || 1) : 0);
+    const curPE = m.peBasicExclExtraTTM || m.peTTM ||
+      (price > 0 && (m.epsBasicExclExtraTTM || m.epsTTM) > 0 ? price / (m.epsBasicExclExtraTTM || m.epsTTM) : 0);
     const peers = PEERS[ticker] || [];
 
     if (curPE > 0 && curPE < 300 && peers.length > 0) {
-      // For each peer: try Finnhub metric AND Yahoo chart simultaneously, take whichever arrives first
-      async function getPeerPE(peer) {
-        const [fhRes, yhRes] = await Promise.allSettled([
-          fh(`/stock/metric?symbol=${peer}&metric=all`, 4000).then(d => {
-            const pm = d?.metric || {};
-            const pe = pm.peBasicExclExtraTTM || pm.peTTM || 0;
-            return pe > 0 && pe < 300 ? pe : null;
-          }),
-          yhChart(peer, 4000).then(c => {
-            const pe = c?.meta?.trailingPE || 0;
-            return pe > 0 && pe < 300 ? pe : null;
-          }),
-        ]);
-        // Take first non-null result
-        const a = fhRes.status === 'fulfilled' ? fhRes.value : null;
-        const b = yhRes.status === 'fulfilled' ? yhRes.value : null;
-        return a ?? b ?? null;
+      const peerList = peers.slice(0, 6);
+
+      // Step 1: pull from batchPECache (free — already fetched this request or from universe scan)
+      const cachedPEs = peerList
+        .map(p => batchPECache[p])
+        .filter(pe => pe > 0 && pe < 300);
+
+      // Step 2: for any peer not in cache, fetch in parallel (dual source)
+      const missingPeers = peerList.filter(p => !batchPECache[p] || batchPECache[p] <= 0);
+      let fetchedPEs = [];
+      if (missingPeers.length > 0) {
+        async function getPeerPE(peer) {
+          const [fhRes, yhRes] = await Promise.allSettled([
+            fh(`/stock/metric?symbol=${peer}&metric=all`, 4000).then(d => {
+              const pe = d?.metric?.peBasicExclExtraTTM || d?.metric?.peTTM || 0;
+              return pe > 0 && pe < 300 ? pe : null;
+            }),
+            yhChart(peer, 4000).then(c => {
+              const pe = c?.meta?.trailingPE || 0;
+              return pe > 0 && pe < 300 ? pe : null;
+            }),
+          ]);
+          const a = fhRes.status === 'fulfilled' ? fhRes.value : null;
+          const b = yhRes.status === 'fulfilled' ? yhRes.value : null;
+          return a ?? b ?? null;
+        }
+        const fetched = await Promise.allSettled(missingPeers.map(getPeerPE));
+        fetchedPEs = fetched
+          .filter(r => r.status === 'fulfilled' && r.value != null)
+          .map(r => r.value);
       }
 
-      const peerResults = await Promise.allSettled(peers.slice(0, 6).map(getPeerPE));
-      const peerPEs = peerResults
-        .filter(r => r.status === 'fulfilled' && r.value != null)
-        .map(r => r.value)
-        .sort((a, b) => a - b);
+      const allPeerPEs = [...cachedPEs, ...fetchedPEs].sort((a, b) => a - b);
 
-      if (peerPEs.length >= 1) {
-        const mid    = Math.floor(peerPEs.length / 2);
-        const median = peerPEs.length % 2 === 0 ? (peerPEs[mid-1]+peerPEs[mid])/2 : peerPEs[mid];
-        const diff   = ((curPE - median) / median * 100);
-        const abs    = Math.abs(diff).toFixed(0);
-        const lbl    = `peer med ${median.toFixed(1)}x (n=${peerPEs.length})`;
-        if      (diff < -10) s6 = { status:'pass',    value:`${abs}% below ${lbl}` };
-        else if (diff >  10) s6 = { status:'fail',    value:`${abs}% above ${lbl}` };
-        else                  s6 = { status:'neutral', value:`In line — ${lbl}` };
+      if (allPeerPEs.length >= 1) {
+        const mid    = Math.floor(allPeerPEs.length / 2);
+        const median = allPeerPEs.length % 2 === 0
+          ? (allPeerPEs[mid-1] + allPeerPEs[mid]) / 2
+          : allPeerPEs[mid];
+        const diff = ((curPE - median) / median * 100);
+        const abs  = Math.abs(diff).toFixed(0);
+        if      (diff < -10) s6 = { status:'pass',    value:`${abs}% below peer median ${median.toFixed(1)}x` };
+        else if (diff >  10) s6 = { status:'fail',    value:`${abs}% above peer median ${median.toFixed(1)}x` };
+        else                  s6 = { status:'neutral', value:`In line with peers, median ${median.toFixed(1)}x` };
       } else {
-        // Still show own PE so the pill isn't empty
-        s6 = { status:'neutral', value:`PE ${curPE.toFixed(1)}x — peer data loading` };
+        // Show own PE so pill is never empty
+        s6 = { status:'neutral', value:`PE ${curPE.toFixed(1)}x (peer data unavailable)` };
       }
     } else if (curPE < 0) {
       s6 = { status:'neutral', value:'Peer PE N/A (loss-making)' };
     } else if (curPE >= 300) {
-      s6 = { status:'neutral', value:`PE ${curPE.toFixed(0)}x (very high — peers skipped)` };
+      s6 = { status:'neutral', value:`PE ${curPE.toFixed(0)}x (peers not comparable)` };
     } else if (!PEERS[ticker]) {
       s6 = { status:'neutral', value:`PE ${curPE > 0 ? curPE.toFixed(1)+'x' : 'N/A'} — no peers mapped` };
     } else {
@@ -495,16 +516,42 @@ async function analyseTicker(ticker) {
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
+// KEY INSIGHT: when analysing a batch of 20 tickers, we already know each
+// ticker's PE (from Finnhub metric). We build a shared peerPE lookup from the
+// batch itself FIRST, then pass it into each ticker's s6 calculation.
+// This means peers in the same batch never need extra API calls — free data.
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error:'POST only' });
   if (!FINNHUB_KEY) return res.status(500).json({ error:'FINNHUB_KEY not configured' });
 
-  const { tickers } = req.body;
+  const { tickers, universePECache: clientCache } = req.body;
   if (!Array.isArray(tickers)||!tickers.length) return res.status(400).json({ error:'tickers required' });
 
   const cleaned = [...new Set(tickers.slice(0,20).map(t=>t.toUpperCase().trim()).filter(Boolean))];
 
-  const settled = await Promise.allSettled(cleaned.map(t => analyseTicker(t)));
+  // Step 1: fetch all metrics in parallel first to build a PE lookup table
+  const metricResults = await Promise.allSettled(
+    cleaned.map(t => fh(`/stock/metric?symbol=${t}&metric=all`, 6000))
+  );
+
+  // Also incorporate any PE data sent from the client (from the universe scan)
+  // clientCache is { TICKER: pe } populated by top3.js quick-scan results
+  const batchPECache = { ...(clientCache || {}) };
+  metricResults.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value?.metric) {
+      const m = r.value.metric;
+      const pe = m.peBasicExclExtraTTM || m.peTTM || 0;
+      if (pe > 0 && pe < 300) batchPECache[cleaned[i]] = pe;
+    }
+  });
+
+  // Step 2: analyse each ticker, passing the shared PE cache
+  const settled = await Promise.allSettled(
+    cleaned.map((t, i) => {
+      const preloadedMetric = metricResults[i].status === 'fulfilled' ? metricResults[i].value : null;
+      return analyseTicker(t, preloadedMetric, batchPECache);
+    })
+  );
 
   const results = {};
   settled.forEach((r, i) => {
