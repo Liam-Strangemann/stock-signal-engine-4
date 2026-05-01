@@ -266,23 +266,25 @@ async function analyseTicker(ticker) {
   // ── Signal 2: PE vs historical ────────────────────────────────────────────
   let s2 = { status:'neutral', value:'No PE data' };
   try {
-    // Finnhub metric has peBasicExclExtraTTM, peTTM, epsBasicExclExtraTTM
-    const pe   = m.peBasicExclExtraTTM || m.peTTM || 0;
-    const eps  = m.epsBasicExclExtraTTM || m.epsTTM || 0;
-    // 52w from metric (very reliable)
-    const hi52 = m['52WeekHigh'] || chart?.meta?.fiftyTwoWeekHigh || 0;
-    const lo52 = m['52WeekLow']  || chart?.meta?.fiftyTwoWeekLow  || 0;
+    const pe  = m.peBasicExclExtraTTM || m.peTTM || 0;
+    // EPS: try metric directly, then derive from price/PE (always works when PE exists)
+    let eps = m.epsBasicExclExtraTTM || m.epsTTM || m.epsAnnual || 0;
+    if ((!eps || eps === 0) && pe > 0 && price > 0) eps = price / pe;
+    // 52w hi/lo — metric first, then Yahoo chart meta, then chart closes
+    const hi52 = m['52WeekHigh'] || chart?.meta?.fiftyTwoWeekHigh ||
+      (chart?.indicators?.quote?.[0]?.close ? Math.max(...(chart.indicators.quote[0].close.filter(Boolean))) : 0);
+    const lo52 = m['52WeekLow']  || chart?.meta?.fiftyTwoWeekLow  ||
+      (chart?.indicators?.quote?.[0]?.close ? Math.min(...(chart.indicators.quote[0].close.filter(Boolean))) : 0);
 
     if (pe !== 0) {
       if (pe < 0) {
-        // Negative PE = loss-making
         s2 = { status:'fail', value:`Loss-making (EPS: $${(eps||0).toFixed(2)})` };
       } else {
-        // Estimate historical PE from 52w midpoint / EPS
-        const midPx = hi52 > 0 && lo52 > 0 ? (hi52 + lo52) / 2 : 0;
-        const histPE = midPx > 0 && eps > 0 ? midPx / eps : 0;
+        // Historical PE = midpoint of 52w range / EPS
+        const midPx  = hi52 > 0 && lo52 > 0 ? (hi52 + lo52) / 2 : 0;
+        const histPE = midPx > 0 && eps > 0  ? midPx / eps         : 0;
         if (histPE > 1 && histPE < 500) {
-          if      (pe < histPE * 0.90) s2 = { status:'pass',    value:`PE ${pe.toFixed(1)}x < hist ~${histPE.toFixed(0)}x ✓` };
+          if      (pe < histPE * 0.90) s2 = { status:'pass',    value:`PE ${pe.toFixed(1)}x < hist ~${histPE.toFixed(0)}x` };
           else if (pe > histPE * 1.10) s2 = { status:'fail',    value:`PE ${pe.toFixed(1)}x > hist ~${histPE.toFixed(0)}x` };
           else                          s2 = { status:'neutral', value:`PE ${pe.toFixed(1)}x ≈ hist ~${histPE.toFixed(0)}x` };
         } else {
@@ -299,21 +301,36 @@ async function analyseTicker(ticker) {
   // ── Signal 3: Price vs 50d MA ─────────────────────────────────────────────
   let s3 = { status:'neutral', value:'No MA data' };
   try {
-    // Try Finnhub metric first (50-day moving average)
-    let ma50 = m['50DayMovingAverage'] || m.ma50 || 0;
-    // Fall back to computing from Yahoo chart closes
+    // PRIMARY: compute directly from Yahoo chart closes (always have this from chartR)
+    // This is more reliable than the Finnhub metric field name which varies
+    const closes = chart?.indicators?.quote?.[0]?.close || [];
+    let ma50 = computeMA50(closes);
+    // SUPPLEMENT: Finnhub metric field (try several known field names)
     if (!ma50 || ma50 <= 0) {
-      const closes = chart?.indicators?.quote?.[0]?.close;
-      ma50 = computeMA50(closes) || 0;
+      ma50 = m['50DayMovingAverage'] || m['10DayAverageTradingVolume']
+        ? m['50DayMovingAverage'] || 0
+        : 0;
+    }
+    // LAST RESORT: Yahoo chart meta has fiftyDayAverage
+    if (!ma50 || ma50 <= 0) {
+      ma50 = chart?.meta?.fiftyDayAverage || 0;
     }
     if (ma50 > 0) {
-      const diff = price - ma50;
-      const pct  = ((diff / ma50) * 100).toFixed(1);
+      const pct = ((price - ma50) / ma50 * 100).toFixed(1);
       s3 = price <= ma50
         ? { status:'pass', value:`$${price.toFixed(2)} ≤ 50d MA $${ma50.toFixed(2)} (${pct}%)` }
         : { status:'fail', value:`$${price.toFixed(2)} > 50d MA $${ma50.toFixed(2)} (+${pct}%)` };
     } else {
-      s3 = { status:'neutral', value:`Price $${price.toFixed(2)} — MA data unavailable` };
+      // Still show something useful: price vs 20d avg if we have closes
+      const ma20 = closes.length >= 5 ? computeMA50(closes.slice(-20)) : 0;
+      if (ma20 > 0) {
+        const pct = ((price - ma20) / ma20 * 100).toFixed(1);
+        s3 = price <= ma20
+          ? { status:'pass', value:`$${price.toFixed(2)} ≤ 20d MA $${ma20.toFixed(2)} (${pct}%)` }
+          : { status:'fail', value:`$${price.toFixed(2)} > 20d MA $${ma20.toFixed(2)} (+${pct}%)` };
+      } else {
+        s3 = { status:'neutral', value:`Price $${price.toFixed(2)} (MA data loading)` };
+      }
     }
   } catch (_) {}
 
@@ -341,25 +358,37 @@ async function analyseTicker(ticker) {
     }
   } catch (_) {}
 
-  // ── Signal 5: Analyst target ──────────────────────────────────────────────
+  // ── Signal 5: Analyst target — always show $ upside % ────────────────────
   let s5 = { status:'neutral', value:'No analyst data' };
   try {
-    const tgtMedian = target?.targetMedian || target?.targetMean || 0;
-    const tgtHigh   = target?.targetHigh || 0;
-    const tgtLow    = target?.targetLow || 0;
-    const numAnal   = target?.lastUpdated ? '' : '';
+    // Finnhub price-target: targetMedian, targetMean, targetHigh, targetLow
+    let tgtMedian = target?.targetMedian || target?.targetMean || 0;
+    const tgtHigh = target?.targetHigh || 0;
+    const tgtLow  = target?.targetLow  || 0;
+
+    // If Finnhub target missing, try Yahoo chart meta (sometimes has targetMeanPrice)
+    if (!tgtMedian && chart?.meta?.targetMeanPrice) {
+      tgtMedian = chart.meta.targetMeanPrice;
+    }
 
     if (tgtMedian > 0 && price > 0) {
-      const up = ((tgtMedian - price) / price * 100);
-      const upStr = `${up >= 0 ? '+' : ''}${up.toFixed(1)}%`;
-      const range = tgtLow > 0 && tgtHigh > 0 ? ` ($${tgtLow.toFixed(0)}–$${tgtHigh.toFixed(0)})` : '';
-      s5 = up >= 25
-        ? { status:'pass',    value:`Target $${tgtMedian.toFixed(2)}, ${upStr} upside${range}` }
-        : { status: up >= 0 ? 'neutral' : 'fail', value:`Target $${tgtMedian.toFixed(2)}, ${upStr}${range}` };
+      const upPct = ((tgtMedian - price) / price * 100);
+      const upStr = `${upPct >= 0 ? '+' : ''}${upPct.toFixed(1)}%`;
+      // Show range if available
+      const range = tgtLow > 0 && tgtHigh > 0
+        ? ` (range $${tgtLow.toFixed(0)}–$${tgtHigh.toFixed(0)})`
+        : '';
+      if (upPct >= 20) {
+        s5 = { status:'pass',    value:`Target $${tgtMedian.toFixed(2)}, ${upStr} upside${range}` };
+      } else if (upPct >= 0) {
+        s5 = { status:'neutral', value:`Target $${tgtMedian.toFixed(2)}, ${upStr} upside${range}` };
+      } else {
+        s5 = { status:'fail',    value:`Target $${tgtMedian.toFixed(2)}, ${upStr} downside${range}` };
+      }
     } else {
-      // Fall back to recommendation trend (buy/hold/sell counts)
+      // Fallback: recommendation counts — show as "X% buy rating"
       const recs = Array.isArray(rec) ? rec : [];
-      const latest = recs[0]; // most recent month
+      const latest = recs[0];
       if (latest) {
         const buy   = (latest.strongBuy||0) + (latest.buy||0);
         const hold  = latest.hold||0;
@@ -369,7 +398,7 @@ async function analyseTicker(ticker) {
           const pct = Math.round(buy / total * 100);
           s5 = {
             status: pct >= 60 ? 'pass' : pct >= 35 ? 'neutral' : 'fail',
-            value: `${pct}% buy (${buy}B/${hold}H/${sell}S, ${total} analysts)`,
+            value: `${pct}% analyst buy (${buy}B / ${hold}H / ${sell}S)`,
           };
         } else {
           s5 = { status:'neutral', value:'No analyst coverage' };
@@ -380,49 +409,59 @@ async function analyseTicker(ticker) {
     }
   } catch (_) {}
 
-  // ── Signal 6: PE vs peers ─────────────────────────────────────────────────
+  // ── Signal 6: PE vs peers — dual source per peer ─────────────────────────
   let s6 = { status:'neutral', value:'No peer data' };
   try {
-    const curPE = m.peBasicExclExtraTTM || m.peTTM || 0;
+    const curPE = m.peBasicExclExtraTTM || m.peTTM || (price > 0 ? price / (m.epsBasicExclExtraTTM || m.epsTTM || 1) : 0);
     const peers = PEERS[ticker] || [];
 
-    if (curPE > 0 && curPE < 200 && peers.length > 0) {
-      // Fetch peer metrics in parallel — Finnhub metric is the fastest source
-      const peerResults = await Promise.allSettled(
-        peers.slice(0, 6).map(p =>
-          fh(`/stock/metric?symbol=${p}&metric=all`, 4000)
-            .then(d => {
-              const pm = d?.metric || {};
-              const pe = pm.peBasicExclExtraTTM || pm.peTTM || 0;
-              return pe > 0 && pe < 200 ? pe : null;
-            })
-        )
-      );
+    if (curPE > 0 && curPE < 300 && peers.length > 0) {
+      // For each peer: try Finnhub metric AND Yahoo chart simultaneously, take whichever arrives first
+      async function getPeerPE(peer) {
+        const [fhRes, yhRes] = await Promise.allSettled([
+          fh(`/stock/metric?symbol=${peer}&metric=all`, 4000).then(d => {
+            const pm = d?.metric || {};
+            const pe = pm.peBasicExclExtraTTM || pm.peTTM || 0;
+            return pe > 0 && pe < 300 ? pe : null;
+          }),
+          yhChart(peer, 4000).then(c => {
+            const pe = c?.meta?.trailingPE || 0;
+            return pe > 0 && pe < 300 ? pe : null;
+          }),
+        ]);
+        // Take first non-null result
+        const a = fhRes.status === 'fulfilled' ? fhRes.value : null;
+        const b = yhRes.status === 'fulfilled' ? yhRes.value : null;
+        return a ?? b ?? null;
+      }
+
+      const peerResults = await Promise.allSettled(peers.slice(0, 6).map(getPeerPE));
       const peerPEs = peerResults
         .filter(r => r.status === 'fulfilled' && r.value != null)
         .map(r => r.value)
         .sort((a, b) => a - b);
 
       if (peerPEs.length >= 1) {
-        const mid = Math.floor(peerPEs.length / 2);
-        const median = peerPEs.length % 2 === 0
-          ? (peerPEs[mid-1] + peerPEs[mid]) / 2
-          : peerPEs[mid];
-        const diff = ((curPE - median) / median * 100);
-        const absDiff = Math.abs(diff).toFixed(0);
-        const lbl = `med ${median.toFixed(1)}x (${peerPEs.length}p)`;
-        if      (diff < -10) s6 = { status:'pass',    value:`${absDiff}% below peers, ${lbl}` };
-        else if (diff >  10) s6 = { status:'fail',    value:`${absDiff}% above peers, ${lbl}` };
-        else                  s6 = { status:'neutral', value:`In line with peers, ${lbl}` };
+        const mid    = Math.floor(peerPEs.length / 2);
+        const median = peerPEs.length % 2 === 0 ? (peerPEs[mid-1]+peerPEs[mid])/2 : peerPEs[mid];
+        const diff   = ((curPE - median) / median * 100);
+        const abs    = Math.abs(diff).toFixed(0);
+        const lbl    = `peer med ${median.toFixed(1)}x (n=${peerPEs.length})`;
+        if      (diff < -10) s6 = { status:'pass',    value:`${abs}% below ${lbl}` };
+        else if (diff >  10) s6 = { status:'fail',    value:`${abs}% above ${lbl}` };
+        else                  s6 = { status:'neutral', value:`In line — ${lbl}` };
       } else {
-        s6 = { status:'neutral', value:`Own PE ${curPE.toFixed(1)}x — peers unavailable` };
+        // Still show own PE so the pill isn't empty
+        s6 = { status:'neutral', value:`PE ${curPE.toFixed(1)}x — peer data loading` };
       }
     } else if (curPE < 0) {
       s6 = { status:'neutral', value:'Peer PE N/A (loss-making)' };
+    } else if (curPE >= 300) {
+      s6 = { status:'neutral', value:`PE ${curPE.toFixed(0)}x (very high — peers skipped)` };
     } else if (!PEERS[ticker]) {
       s6 = { status:'neutral', value:`PE ${curPE > 0 ? curPE.toFixed(1)+'x' : 'N/A'} — no peers mapped` };
     } else {
-      s6 = { status:'neutral', value:'PE data needed for peers' };
+      s6 = { status:'neutral', value:'PE unavailable for peer comparison' };
     }
   } catch (_) {}
 
