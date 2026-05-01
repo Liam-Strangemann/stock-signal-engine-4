@@ -1,20 +1,18 @@
-// pages/api/top3.js  v5
+// pages/api/top3.js  v6
 //
-// Changes from v4:
-//  1. Correct count displayed — returns totalUniverse (full list length ~1,800)
-//     alongside totalScanned (how many returned valid data). The UI now shows
-//     "Scanning 1,800 securities" on first load and "X of 1,800 returned data"
-//     after the scan completes.
-//  2. Rolling 5-minute re-scan endpoint — accepts GET ?refresh=1 to force a
-//     fresh scan. The scheduler in the frontend calls this every 5 minutes.
-//     Returns { candidates, stockMeta, totalScanned, totalUniverse, freshAt }.
-//  3. Incremental top-pick promotion — the cache now stores ALL scanned results
-//     (not just candidates). When the frontend re-fetches, it can compare fresh
-//     scores against the current top-9 and promote better stocks.
-//     New response field: `allScored` — array of { symbol, qs, price, pe, mc,
-//     exchange } sorted by quickScore descending (top 50 returned to keep
-//     payload small).
-//  4. No change to quickScore logic or universe — same ~1,800 tickers as v4.
+// PROGRESSIVE BATCH SCANNING — instant results, no timeout
+//
+// The universe is split into named batches ordered by priority:
+//   Batch 1 — ~150 megacaps (returned immediately to frontend)
+//   Batch 2-N — remaining sectors in groups of ~150
+//
+// The API accepts ?batch=0,1,2... to fetch specific batches.
+// The frontend calls batch=0 first (megacaps), renders top picks,
+// then fires batch=1,2,3... in the background, promoting better stocks
+// as they come in.
+//
+// Each batch scans quickly in parallel (150 tickers × Yahoo = ~3-4s).
+// No Vercel timeout issues — each batch is its own fast request.
 
 const YH = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -24,159 +22,103 @@ const YH = {
   'Referer': 'https://finance.yahoo.com/',
 };
 
-// ── Universe — ~1,800 tickers across all 11 GICS sectors ─────────────────────
-const UNIVERSE = [
-  // ── Mega-cap tech ─────────────────────────────────────────────────────────
-  'AAPL','MSFT','NVDA','AMZN','GOOGL','GOOG','META','TSLA','AVGO','ORCL',
-  // ── Semiconductors ───────────────────────────────────────────────────────
-  'AMD','INTC','QCOM','TXN','AMAT','MU','KLAC','LRCX','SNPS','CDNS',
-  'ADI','MRVL','MCHP','ON','STX','WDC','MPWR','SWKS','QRVO','NXPI',
-  'WOLF','ACLS','ONTO','COHU','ICHR','FORM','CAMT','AXTI','PDFS','SITM',
-  'ALGM','AMBA','DIOD','SLAB','POWI','IOSP','CLS','RMBS','SMTC','PI',
-  // ── Software / Cloud / SaaS ──────────────────────────────────────────────
-  'CRM','ADBE','NOW','INTU','WDAY','PANW','FTNT','CRWD','ZS','SNOW',
-  'DDOG','MDB','TEAM','HUBS','OKTA','VEEV','ANSS','PTC','CTSH','WIT',
-  'PAYC','PAYLOCITY','PCOR','SMAR','ESTC','TENB','QLYS','CYBR','SAIL','CWAN',
-  'BRZE','APP','GTLB','BILL','FRSH','MNDY','DOCN','WEX','RAMP','ALTR',
-  'CPNG','GRAB','SE','U','RBLX','HOOD','AFRM','UPST','SOFI','LC',
-  'OPEN','MKTX','LPLA','RJF','IBKR','VIRT','PIPR','SF','COOP','PFSI',
-  // ── Internet / Media / Platforms ─────────────────────────────────────────
-  'NFLX','SPOT','PINS','SNAP','RDDT','LYFT','UBER','ABNB','BKNG','EXPE',
-  'TRIP','YELP','TTD','DV','PUBM','MGNI','IAC','ANGI','ZG','RDFN',
-  'CARS','CDK','COX','TKO','LYV','MSGS','SEAT','EVERI','IGT','DKNG',
-  // ── Hardware / IT services ───────────────────────────────────────────────
-  'IBM','CSCO','HPE','HPQ','DELL','ACN','EPAM','GLOB','LDOS','SAIC',
-  'JNPR','NET','FFIV','NTAP','PSTG','EXTR','CIEN','VIAV','INFN','CALX',
-  'LUMN','ZAYO','FYBR','CNSL','SHEN','CABO','WOW','IIVI','COHR','LITE',
-  // ── Finance — large banks ────────────────────────────────────────────────
-  'JPM','BAC','WFC','C','GS','MS','USB','PNC','TFC','FITB',
-  'HBAN','KEY','MTB','CFG','RF','ZION','CMA','WAL','EWBC','CVBF',
-  'BOKF','CATY','FFIN','IBOC','SBCF','NBTB','WSFS','TOWN','CTBI','MBWM',
-  'FBIZ','HAFC','NWBI','CCBG','OVBC','ESSA','BSVN','FLIC','SRCE','MCBC',
-  // ── Finance — insurance ──────────────────────────────────────────────────
-  'BRK-B','AIG','MET','PRU','AFL','CB','TRV','ALL','PGR','HIG',
-  'MMC','AON','WTW','CINF','GL','RNR','RE','EG','SIGI','ERIE',
-  'AIZ','UNM','LNC','BHF','FG','NWLI','PLICO','EQNR','ORI','KMPR',
-  // ── Finance — asset mgmt / markets / fintech ─────────────────────────────
-  'BLK','SCHW','AXP','MA','V','PYPL','FIS','GPN','FISV','COIN',
-  'CME','ICE','SPGI','MCO','MSCI','NDAQ','CBOE','IVZ','BEN','AMG',
-  'BX','KKR','APO','ARES','CG','TPG','STEP','BLUE','OWL','HLNE',
-  'SQ','AFRM','SOFI','UPST','MQ','FLYW','PAX','PAYO','DLO','EEFT',
-  // ── Healthcare — large pharma ────────────────────────────────────────────
-  'LLY','JNJ','ABBV','MRK','PFE','BMY','AMGN','REGN','BIIB','VRTX',
-  'GILD','INCY','ALNY','MRNA','BNTX','NVAX','HZNP','JAZZ','PRGO','ENDP',
-  'CTLT','PCRX','PAHC','ADMA','MNKD','IRWD','SUPN','AGIO','PTGX','ACAD',
-  // ── Healthcare — managed care ────────────────────────────────────────────
-  'UNH','CVS','CI','HUM','ELV','CNC','MOH','ANTM','OSCR','CLOV',
-  // ── Healthcare — medtech / devices ──────────────────────────────────────
-  'TMO','ABT','MDT','ISRG','BSX','SYK','BDX','EW','ZBH','BAX',
-  'DXCM','RMD','HOLX','IQV','IDXX','WAT','PODD','NTRA','TFX','SWAV',
-  'GEHC','HSIC','PDCO','STE','MMSI','NVST','ALGN','CENTA','PRCT','MASI',
-  'IRTC','BLFS','ONEM','LFST','ATRC','HAYW','LMAT','AXNX','MVST','GKOS',
-  // ── Healthcare — biotech (larger names) ──────────────────────────────────
-  'ILMN','PACB','TWST','CDNA','RXRX','BEAM','EDIT','NTLA','CRSP','FATE',
-  'KYMR','AKRO','ARDX','PRAX','ARQT','RCUS','IMVT','TARS','CLDX','MRUS',
-  'SRRK','MIRM','XENE','PTCT','FOLD','RARE','ACLX','FGEN','AIMD','IOVA',
-  // ── Energy — oil & gas majors ────────────────────────────────────────────
-  'XOM','CVX','COP','EOG','SLB','MPC','PSX','VLO','OXY','DVN',
-  'HAL','BKR','HES','TPL','FANG','MRO','APA','CTRA','SM','MTDR',
-  'NOG','PR','CHRD','KOS','RRC','EQT','AR','SWN','CNX','GPOR',
-  'ESTE','TALO','ERF','PBF','DKL','PAA','HESM','MPLX','WES','ENLC',
-  // ── Energy — LNG / midstream ─────────────────────────────────────────────
-  'LNG','CQP','GLNG','FLNG','OKE','WMB','KMI','EPD','ET','MMP',
-  'TRGP','AM','DT','PAGP','BSM','CAPL','SMLP','CMLP','GLP','NRGP',
-  // ── Consumer discretionary ───────────────────────────────────────────────
-  'HD','MCD','NKE','SBUX','LOW','TGT','BKNG','MAR','HLT','YUM',
-  'CMG','DRI','QSR','ORLY','AZO','TSCO','ULTA','TJX','ROST','LULU',
-  'RH','W','ETSY','EBAY','CPRT','KMX','AN','PAG','GPC','AAP',
-  'GNTX','BWA','LEA','LKQ','WGO','THO','POOL','FOXF','DORM','MTOR',
-  'HOG','PII','LCII','PATK','SHYF','REX','BOOT','CATO','DBI','PLCE',
-  'VSCO','ANF','AEO','FL','SCVL','HIBB','CASY','WING','JACK','CAKE',
-  'TXRH','BJRI','SHAK','FAT','RAVE','DINE','EAT','RUTH','BLMN','PBPB',
-  // ── Consumer staples ─────────────────────────────────────────────────────
-  'KO','PEP','PG','PM','MO','KHC','GIS','HSY','MDLZ','CL',
-  'CLX','CHD','SYY','KR','CAG','MKC','TSN','HRL','SJM','CPB',
-  'BG','ADM','INGR','JBSS','CALM','SAFM','BRBR','SMPL','UTZ','FRPT',
-  'CELH','MNST','FIZZ','COTT','PRMW','ARCA','REED','HAIN','UNFI','SPTN',
-  // ── Automotive / EVs ─────────────────────────────────────────────────────
-  'F','GM','RIVN','LCID','NIO','LI','XPEV','STLA','TM','HMC',
-  'NKLA','WKHS','GOEV','FSR','BLNK','CHPT','EVGO','PTRA','DRVN','KAR',
-  // ── Industrials — aerospace / defense ────────────────────────────────────
-  'CAT','HON','GE','RTX','LMT','NOC','GD','BA','HII','TDG',
-  'HEI','KTOS','CACI','LDOS','BAH','SAIC','AXON','DRS','AVAV','RKLB',
-  'SPCE','ASTS','RDW','PL','BWXT','MOOG','CW','DRS','HEICO','TGI',
-  // ── Industrials — machinery / equipment ──────────────────────────────────
-  'DE','EMR','ROK','ITW','ETN','PH','DOV','XYL','IR','IEX',
-  'AME','GNRC','FELE','ESCO','RBC','CWST','RSG','WM','CTAS','EXPO',
-  'GFF','ARIS','NN','AIRGASES','FLOW','ROPER','VRSK','FAST','GWW','MSC',
-  'WSO','WDFC','ACCO','KN','DOOR','AZEK','TREX','LGIH','XPEL','GTES',
-  // ── Industrials — transport / logistics ──────────────────────────────────
-  'UPS','FDX','UNP','CSX','NSC','ODFL','SAIA','XPO','JBHT','CHRW',
-  'EXPD','HUBG','ARCB','MRTN','WERN','KNX','SNDR','USX','GXO','ECHO',
-  'RADG','HTLD','CVLG','PTSI','UHAL','R','URI','GATX','ATSG','AAWW',
-  'DAL','UAL','LUV','AAL','ALK','JBLU','SAVE','HA','SY','SNCY',
-  // ── Materials ────────────────────────────────────────────────────────────
-  'LIN','APD','ECL','NEM','FCX','PPG','SHW','ALB','NUE','STLD',
-  'CLF','CMC','MP','BALL','PKG','IP','SEE','BMS','OLN','CC',
-  'HUN','EMN','AVNT','TROX','VNTR','KRO','TG','ORB','SLCA','CSTM',
-  'ATI','CRS','HXL','KALU','SXC','TMST','ZEKH','AMR','ARCH','CEIX',
-  // ── Utilities ────────────────────────────────────────────────────────────
-  'NEE','DUK','SO','AEP','EXC','D','PCG','XEL','WEC','ES',
-  'PEG','FE','EIX','PPL','NI','CMS','AES','LNT','EVRG','AGR',
-  'POR','AVA','NWE','SR','MGEE','OTTR','NWEC','ENIA','CPK','UIL',
-  // ── REITs ────────────────────────────────────────────────────────────────
-  'AMT','PLD','EQIX','CCI','SPG','O','VICI','PSA','EXR','WELL',
-  'ARE','BXP','KIM','REG','FRT','SITC','NNN','ADC','STAG','COLD',
-  'LTC','SBRA','SNH','HR','DEI','PGRE','PDM','CUZ','SLG','HIW',
-  'EQR','AVB','ESS','MAA','UDR','CPT','NHI','NXRT','IRT','AIRC',
-  'WPT','IIPR','HASI','ABR','BXMT','KREF','GPMT','TRTX','LADR','RC',
-  // ── Telecom ──────────────────────────────────────────────────────────────
-  'T','VZ','TMUS','CMCSA','CHTR','LUMN','USM','SHEN','CABO','WOW',
-  'IRDM','VSAT','GSAT','NTES','ISAT','DISH','LWAY','ATNI','GOCO','PCTEL',
-  // ── Media / Entertainment / Gaming ───────────────────────────────────────
-  'DIS','NFLX','WBD','PARA','AMCX','FOXA','FOX','NYT','GTN','SBGI',
-  'ROKU','FUBO','SIRI','LSXMA','LSXMK','WWE','TKO','LYV','MSGS','SEAS',
-  'EA','TTWO','ATVI','RBLX','HUYA','DOYU','MSGE','MSG','MANU','LGF-A',
-  // ── International ADRs — Europe ──────────────────────────────────────────
-  'ASML','SAP','NVO','AZN','GSK','BTI','SHEL','BP','TTE','UL',
-  'RIO','BHP','VALE','PBR','SID','ABB','PHIA','ING','BNP','DB',
-  'UBS','HSBC','BARC','LLOY','VOD','TEF','VIV','ORAN','NOK','ERIC',
-  'WOLF','NXPI','STM','AIXA','AMS','BESI','COMET','DISCO','ELUX','LONN',
-  // ── International ADRs — Asia / Pacific ──────────────────────────────────
-  'TSM','TM','HMC','SONY','NTDOY','SE','BABA','JD','PDD','BIDU',
-  'NIO','TCEHY','NTES','TME','IQ','BILI','VIPS','YUMC','WB','MOMO',
-  'ACH','CHU','CHL','CHT','MFC','SLF','POW','BCE','TD','RY',
-  'BMO','BNS','CM','NA','EMA','FTS','QBR','TRP','ENB','CNQ',
-  // ── Small/Mid-cap value & special situations ──────────────────────────────
-  'DCOM','CFFN','ESSA','BSVN','FLIC','SRCE','MCBC','FFBW','CBTX','HBT',
-  'NBTB','WSFS','TOWN','CTBI','MBWM','FBIZ','HAFC','NWBI','CCBG','OVBC',
-  'AMAL','BFST','CADE','COLB','CVBF','FBMS','FBNC','FUNC','GNTY','HWC',
-  'INDB','IBTX','LKFN','MOFG','NBHC','NRIM','OCFC','PFIS','PPBI','SASR',
-  'SBCF','TCBK','TRMK','UFCS','UVSP','VCNX','VBTX','WAFD','WSBC','CZNC',
-  // ── Mid-cap cyclicals / industrials value ─────────────────────────────────
-  'AIT','APOG','ASTE','BGCP','CLB','CSWI','DXC','ENR','GATX','GMS',
-  'GNSS','HNI','HTLF','HUBB','IPAR','KFY','KELYA','LMB','LQDT','MGRC',
-  'MRC','MWA','NPK','NWL','PATK','PKOH','REVG','RGP','SXI','TILE',
-  'TNC','USLM','VICR','VSEC','WKC','WTS','ZURN','ZWS','AQUA','AVPT',
-  // ── Small-cap growth / tech ───────────────────────────────────────────────
-  'ACMR','ADEA','AEYE','AGYS','ALRM','AMID','AMSC','ANET','ANGI','AOSL',
-  'ARKO','ARLO','AROW','ARWT','ASIX','ATEX','ATNI','ATRC','AUPH','AVNW',
-  'AXGN','AXTI','BAND','BBIO','BCAB','BCEI','BCML','BDSI','BELFB','BIOL',
-  'BJRI','BKE','BKSY','BLBD','BLFY','BLMN','BLTE','BMBL','BNED','BNGO',
-  'BPOP','BRDG','BRPH','BRZE','BSGM','BXRX','BYND','BZUN','CALX','CARG',
-  'CASH','CBSH','CCOI','CDRE','CDXS','CEIX','CELH','CHCO','CHMG','CHPT',
-  // ── Commodity / natural resources ─────────────────────────────────────────
-  'AA','ACH','AG','AGI','AEM','AUY','BVN','CCJ','CDE','EXK',
-  'GOLD','HL','IAG','KGC','KL','MAG','NGEX','NXE','OR','PAAS',
-  'SSRM','USAS','WPM','BTG','MUX','SVM','GP','GFI','SBSW','HMY',
-  // ── Clean energy / renewables ─────────────────────────────────────────────
-  'ENPH','SEDG','FSLR','CSIQ','JKS','ARRY','MAXN','RUN','NOVA','SPWR',
-  'PLUG','FCEL','BLDP','BE','HYLN','CLNE','GPRE','REX','PEIX','ALTO',
-  'NEP','CWEN','AY','BEP','AMPS','HASI','NOVA','VVPR','PLTK','GREE',
+// ── Universe split into priority batches ─────────────────────────────────────
+// Batch 0: Megacap / high-liquidity — scanned first, results shown instantly
+// Batch 1+: Remaining sectors scanned in background
+const BATCHES = [
+  // Batch 0 — Megacap + large-cap across key sectors (~160 tickers)
+  [
+    // Mega tech
+    'AAPL','MSFT','NVDA','AMZN','GOOGL','GOOG','META','TSLA','AVGO','ORCL',
+    // Large semis
+    'AMD','INTC','QCOM','TXN','AMAT','MU','KLAC','LRCX','ADI','MRVL',
+    // Large software
+    'CRM','ADBE','NOW','INTU','PANW','FTNT','CRWD','DDOG','WDAY','SNOW',
+    // Large finance
+    'JPM','BAC','WFC','C','GS','MS','BLK','AXP','MA','V',
+    'SCHW','USB','PNC','CME','SPGI','MCO',
+    // Large healthcare
+    'LLY','JNJ','UNH','ABBV','MRK','PFE','TMO','ABT','AMGN','CVS',
+    'MDT','ISRG','GILD','REGN','VRTX','BSX','SYK','ELV',
+    // Large energy
+    'XOM','CVX','COP','EOG','SLB','MPC','PSX','VLO','OXY','DVN',
+    // Large consumer
+    'HD','MCD','NKE','SBUX','LOW','TGT','WMT','COST','AMZN','BKNG',
+    'TJX','ROST','LULU','CMG','YUM',
+    // Large industrials
+    'CAT','HON','GE','RTX','LMT','NOC','DE','UPS','FDX','UNP',
+    // Large utilities / REIT
+    'NEE','DUK','AMT','PLD','EQIX',
+    // Large staples / telecom
+    'KO','PEP','PM','MO','T','VZ','TMUS','CMCSA','NFLX','DIS',
+    // International megacap ADRs
+    'TSM','ASML','NVO','SAP','TM','SHEL','BHP','AZN','HSBC','SONY',
+    'BABA','SE','NIO','VALE','PBR',
+  ],
+
+  // Batch 1 — Mid-large tech + fintech + biotech
+  [
+    'MCHP','ON','STX','WDC','MPWR','NXPI','SNPS','CDNS','ANSS','PTC',
+    'IBM','CSCO','HPE','DELL','ACN','JNPR','NET','NTAP','PSTG',
+    'PYPL','FIS','GPN','FISV','COIN','ICE','NDAQ','CBOE','BX','KKR',
+    'APO','ARES','CG','IVZ','BEN','SCHW',
+    'BIIB','ILMN','MRNA','BNTX','INCY','ALNY','JAZZ','REGN',
+    'AMGN','VRTX','GILD','BMY','ABBV','HZNP',
+    'CI','HUM','MOH','CNC','OSCR',
+    'TMO','DHR','IQV','IDXX','WAT','BDX','EW','ZBH','BAX',
+    'DXCM','RMD','HOLX','PODD','NTRA','ISRG','GEHC',
+    'SPOT','PINS','SNAP','RDDT','LYFT','UBER','ABNB','EXPE','BKNG',
+    'TTD','ROKU','NFLX','WBD','PARA','DIS',
+  ],
+
+  // Batch 2 — Energy midstream + materials + more industrials
+  [
+    'HAL','BKR','HES','TPL','MRO','APA','CTRA','SM','MTDR',
+    'LNG','OKE','WMB','KMI','EPD','ET','TRGP',
+    'NEM','FCX','LIN','APD','ECL','PPG','SHW','ALB','NUE','STLD',
+    'CLF','CMC','BALL','PKG','IP','OLN','EMN',
+    'EMR','ROK','ITW','ETN','PH','DOV','XYL','IR','AME',
+    'GFF','HUBB','FAST','GWW','MSC','CTAS','VRSK',
+    'HOG','PII','LCII','POOL','FOXF',
+    'UNP','CSX','NSC','ODFL','SAIA','XPO','JBHT','CHRW',
+    'DAL','UAL','LUV','AAL','ALK',
+    'RSG','WM','CWST','URI','R',
+    'LMT','NOC','GD','BA','HII','TDG','HEI','KTOS','AXON',
+  ],
+
+  // Batch 3 — Consumer + REITs + small/mid value
+  [
+    'ORLY','AZO','TSCO','ULTA','RH','W','ETSY','EBAY','CPRT','KMX',
+    'BOOT','ANF','AEO','FL','WING','JACK','TXRH','BJRI','EAT','CMG',
+    'MAR','HLT','DRI','QSR','MCD',
+    'F','GM','RIVN','LCID','STLA',
+    'KHC','GIS','HSY','MDLZ','CL','CLX','CHD','SYY','KR','CAG',
+    'TSN','HRL','ADM','MNST','CELH',
+    'NEE','DUK','SO','AEP','EXC','D','PCG','XEL','WEC','PEG',
+    'AMT','PLD','EQIX','CCI','SPG','O','VICI','PSA','EXR','WELL',
+    'EQR','AVB','ESS','MAA','UDR',
+    'T','VZ','TMUS','CMCSA','CHTR','SHEN',
+    'DCOM','CVBF','FFIN','WSFS','TOWN','INDB','LKFN','PPBI',
+    'NKE','UAA','DECK','LULU','SKX',
+  ],
+
+  // Batch 4 — International ADRs + small-cap growth
+  [
+    'BIDU','JD','PDD','TCEHY','NTES','TME','BILI','VIPS','YUMC',
+    'ACH','CHU','MFC','SLF','TD','RY','BMO','BNS','CM','ENB','CNQ',
+    'RIO','UL','GSK','BTI','TEF','VIV','ORAN','NOK','ERIC',
+    'PHIA','ING','BNP','DB','UBS','BARC','LLOY','VOD',
+    'ABB','STM','AIXA','LONN',
+    'ENPH','SEDG','FSLR','CSIQ','ARRY','RUN','NOVA',
+    'PLUG','FCEL','BE','CLNE',
+    'WPM','AEM','NEM','FCX','GOLD','CCJ','KGC','KL',
+    'ACMR','BAND','BMBL','CALX','CELH','CHCO','CCOI',
+    'MKTX','LPLA','RJF','IBKR','VIRT','PIPR',
+    'AFRM','UPST','SOFI','LC','HOOD','SQ',
+  ],
 ];
 
-const UNIQ = [...new Set(UNIVERSE)];
-const TOTAL_UNIVERSE = UNIQ.length; // exposed in response so UI can show "X of 1,800"
+const TOTAL_UNIVERSE = BATCHES.flat().length;
 
 const FALLBACK = [
   'MSFT','AAPL','NVDA','GOOGL','AMZN','META','JPM','XOM','LLY','UNH',
@@ -186,26 +128,17 @@ const FALLBACK = [
 function cleanExchangeLabel(raw) {
   if (!raw) return null;
   const u = raw.toUpperCase();
-  if (u.includes('NASDAQ') || u === 'NGS' || u === 'NMS' || u === 'NGM') return 'NASDAQ';
-  if (u.includes('NYSE') || u === 'NYQ') return 'NYSE';
+  if (u.includes('NASDAQ') || u==='NGS'||u==='NMS'||u==='NGM') return 'NASDAQ';
+  if (u.includes('NYSE') || u==='NYQ') return 'NYSE';
   if (u.includes('LSE') || u.includes('LONDON')) return 'LSE';
   if (u.includes('TSX') || u.includes('TORONTO')) return 'TSX';
-  if (u.includes('HKEX') || u.includes('HONG KONG')) return 'HKEX';
-  if (u.includes('ASX') || u.includes('SYDNEY')) return 'ASX';
-  if (u.includes('TYO') || u.includes('TOKYO')) return 'TYO';
   if (u.includes('OTC') || u.includes('PINK')) return 'OTC';
   return raw.split(/[\s,]/)[0].toUpperCase() || null;
 }
 
-// ── Cache — stores full scored list, not just top candidates ─────────────────
-// This allows the frontend to compare new quickScores against current top-9
-// and promote stocks without a full re-analyse.
-let cache = {
-  data: null,        // the last full response object
-  allScored: [],     // sorted array of all scanned stocks with quickScore
-  ts: 0,
-};
-const TTL = 30 * 60 * 1000; // 30 min for cold cache; forced refresh on ?refresh=1
+// 30-minute cache per batch
+const batchCache = {};
+const TTL = 30 * 60 * 1000;
 
 async function fetchQuick(symbol) {
   for (const base of ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com']) {
@@ -223,15 +156,13 @@ async function fetchQuick(symbol) {
       const price    = meta.regularMarketPrice;
       const hi       = meta.fiftyTwoWeekHigh  || price * 1.2;
       const lo       = meta.fiftyTwoWeekLow   || price * 0.8;
-      const pe       = meta.trailingPE        || null;
-      const mc       = meta.marketCap         || 0;
+      const pe       = meta.trailingPE || null;
+      const mc       = meta.marketCap  || 0;
       const volume   = meta.regularMarketVolume || 0;
-      const exchange = cleanExchangeLabel(meta.exchangeName || meta.fullExchangeName)
-                    || cleanExchangeLabel(meta.exchange);
-
-      const fromHi = hi > 0 ? ((hi - price) / hi * 100) : 0;
-      const range  = hi - lo;
-      const loPct  = range > 0 ? ((price - lo) / range * 100) : 50;
+      const exchange = cleanExchangeLabel(meta.exchangeName || meta.fullExchangeName) || cleanExchangeLabel(meta.exchange);
+      const fromHi   = hi > 0 ? ((hi - price) / hi * 100) : 0;
+      const range    = hi - lo;
+      const loPct    = range > 0 ? ((price - lo) / range * 100) : 50;
 
       return { symbol, price, hi, lo, pe, mc, volume, fromHi, loPct, exchange, valid: true };
     } catch (_) {}
@@ -267,86 +198,80 @@ function quickScore(s) {
   return Math.round(n);
 }
 
-// Sequential batched scan — same as v4 (200 ms pause, batches of 20)
-async function scanUniverseSequentially(universe) {
-  const MINI_BATCH = 20;
-  const PAUSE_MS   = 200;
-  const results = [];
+async function scanBatch(batchIndex) {
+  // Serve from cache if fresh
+  const cached = batchCache[batchIndex];
+  if (cached && Date.now() - cached.ts < TTL) return cached.data;
 
-  for (let i = 0; i < universe.length; i += MINI_BATCH) {
-    const batch = universe.slice(i, i + MINI_BATCH);
-    const batchResults = await Promise.all(batch.map(fetchQuick));
-    for (const r of batchResults) {
-      if (r) results.push(r);
-    }
-    if (i + MINI_BATCH < universe.length) {
-      await new Promise(resolve => setTimeout(resolve, PAUSE_MS));
-    }
+  const tickers = BATCHES[batchIndex] || [];
+  if (!tickers.length) return { scored: [], stockMeta: {} };
+
+  // Fetch all in parallel — each batch is ~150 tickers, completes in ~3-4s
+  const results = await Promise.allSettled(tickers.map(fetchQuick));
+  const valid = results
+    .filter(r => r.status === 'fulfilled' && r.value)
+    .map(r => r.value);
+
+  const scored = valid
+    .map(s => ({ ...s, qs: quickScore(s) }))
+    .sort((a, b) => b.qs - a.qs);
+
+  const stockMeta = {};
+  for (const s of valid) {
+    if (s.exchange) stockMeta[s.symbol] = { exchange: s.exchange };
   }
 
-  return results;
+  const data = { scored, stockMeta, scanned: valid.length, total: tickers.length };
+  batchCache[batchIndex] = { data, ts: Date.now() };
+  return data;
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
+  // ?batch=0 (default) or ?batch=1,2,3
+  const batchParam = req.query?.batch ?? '0';
+  const batchIndices = String(batchParam).split(',').map(Number).filter(n => !isNaN(n) && n >= 0 && n < BATCHES.length);
+  if (!batchIndices.length) batchIndices.push(0);
+
+  // Force refresh bypasses cache
   const forceRefresh = req.query?.refresh === '1';
+  if (forceRefresh) batchIndices.forEach(i => delete batchCache[i]);
 
-  // Serve from cache if fresh (and no forced refresh)
-  if (!forceRefresh && cache.data && Date.now() - cache.ts < TTL) {
-    res.setHeader('X-Cache', 'HIT');
-    return res.status(200).json(cache.data);
-  }
+  // Run requested batches (usually just one at a time)
+  const batchResults = await Promise.allSettled(batchIndices.map(i => scanBatch(i)));
 
-  let candidates    = [];
-  let stockMeta     = {};
-  let totalScanned  = 0;
-  let allScored     = [];
+  let allScored = [];
+  let stockMeta = {};
+  let totalScanned = 0;
 
-  try {
-    const allResults = await scanUniverseSequentially(UNIQ);
-    totalScanned = allResults.length;
-
-    if (allResults.length >= 4) {
-      const scored = allResults
-        .map(s => ({ ...s, qs: quickScore(s) }))
-        .sort((a, b) => b.qs - a.qs);
-
-      // Top 20 by quickScore → full 6-signal analysis
-      candidates = scored.slice(0, 20).map(s => s.symbol);
-
-      // Keep top 50 scored entries for incremental promotion by the frontend
-      allScored = scored.slice(0, 50).map(s => ({
-        symbol:   s.symbol,
-        qs:       s.qs,
-        price:    s.price,
-        pe:       s.pe,
-        mc:       s.mc,
-        exchange: s.exchange,
-      }));
-
-      for (const s of allResults) {
-        if (s.exchange) stockMeta[s.symbol] = { exchange: s.exchange };
-      }
+  for (const r of batchResults) {
+    if (r.status === 'fulfilled') {
+      allScored = allScored.concat(r.value.scored);
+      Object.assign(stockMeta, r.value.stockMeta);
+      totalScanned += r.value.scanned;
     }
-  } catch (_) {}
-
-  if (candidates.length < 4) {
-    candidates   = FALLBACK.slice(0, 20);
-    totalScanned = totalScanned || FALLBACK.length;
   }
+
+  // Sort combined results and pick top candidates for full analysis
+  allScored.sort((a, b) => b.qs - a.qs);
+
+  let candidates = allScored.slice(0, 20).map(s => s.symbol);
+  if (candidates.length < 4) candidates = FALLBACK.slice(0, 20);
   candidates = [...new Set(candidates)].slice(0, 20);
 
-  const result = {
+  // Return top 50 scored for the frontend's incremental pool comparison
+  const top50 = allScored.slice(0, 50).map(s => ({
+    symbol: s.symbol, qs: s.qs, price: s.price, pe: s.pe, mc: s.mc, exchange: s.exchange,
+  }));
+
+  res.setHeader('Cache-Control', 's-maxage=1800, stale-while-revalidate=60');
+  return res.status(200).json({
     candidates,
     stockMeta,
-    allScored,           // top-50 quick-scored entries for incremental pool update
+    allScored: top50,
     totalScanned,
-    totalUniverse: TOTAL_UNIVERSE,   // always ~1,800 — used by UI for "Scanning 1,800"
-    usedFallback: candidates.every(c => FALLBACK.includes(c)),
+    totalBatches: BATCHES.length,
+    totalUniverse: TOTAL_UNIVERSE,
+    batchIndex: batchIndices[0],
     generatedAt: new Date().toISOString(),
-  };
-
-  cache = { data: result, allScored, ts: Date.now() };
-  res.setHeader('Cache-Control', 's-maxage=1800, stale-while-revalidate');
-  return res.status(200).json(result);
+  });
 }
