@@ -277,15 +277,15 @@ function getRating(s) {
 // ── Analyse a single ticker ───────────────────────────────────────────────────
 async function analyseTicker(ticker, crumb, cookies) {
   // Fire Yahoo summary + chart + Finnhub quote + insider all in parallel
-  const [summary, chart, fhQuote, insiderRaw] = await Promise.allSettled([
+  const [ydRaw, ycRaw, fhQuote, insiderRaw] = await Promise.allSettled([
     yahooSummary(ticker, crumb, cookies),
     yahooChart(ticker, crumb, cookies),
     fhGet(`/quote?symbol=${ticker}`, 4000),
     getInsider(ticker),
   ]);
 
-  const yd  = summary.status === 'fulfilled' ? summary.value : null;
-  const yc  = chart.status   === 'fulfilled' ? chart.value   : null;
+  const yd  = ydRaw.status === 'fulfilled' ? ydRaw.value : null;
+  const yc  = ycRaw.status === 'fulfilled' ? ycRaw.value : null;
   const fhq = fhQuote.status === 'fulfilled' ? fhQuote.value : null;
   const ins = insiderRaw.status === 'fulfilled' ? insiderRaw.value : { buys:[], sells:[], src:null };
 
