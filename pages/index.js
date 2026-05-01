@@ -67,13 +67,18 @@ function ScoreDots({score,max=6,dark=false}) {
 }
 
 function SigPill({sig,label,dark=false,signalIndex,onRetry,loading=false}) {
-  const hasVal=!loading&&sig.value&&sig.value!=='--'&&sig.value!=='No data';
-  const p=sig.status==='pass',f=sig.status==='fail';
-  const bg  =!hasVal&&!loading?(dark?C.dkAmberBg:C.amberBg):dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
-  const col =!hasVal&&!loading?(dark?C.dkAmber:C.amber):dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
-  const bdc =!hasVal&&!loading?(dark?C.dkAmberBd:C.amberBd):dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
-  const bd  =!hasVal&&!loading?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
-  const clickable=!hasVal&&!loading&&onRetry;
+  // hasVal = true whenever the backend has sent ANY non-empty string
+  // Only show "tap to retry" when value is genuinely absent/blank
+  const EMPTY = ['', '--', null, undefined];
+  const hasVal = !loading && !EMPTY.includes(sig.value);
+  const p=sig.status==='pass', f=sig.status==='fail';
+  // neutral pills with a value get amber tones; only truly empty pills get dashed border
+  const isEmpty = !hasVal && !loading;
+  const bg  = isEmpty?(dark?C.dkAmberBg:C.amberBg):dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
+  const col = isEmpty?(dark?C.dkAmber:C.amber):dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
+  const bdc = isEmpty?(dark?C.dkAmberBd:C.amberBd):dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
+  const bd  = isEmpty?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
+  const clickable = isEmpty && !loading && onRetry;
   return (
     <div onClick={clickable?()=>onRetry(signalIndex):undefined} title={clickable?`Retry ${label}`:undefined}
       style={{background:bg,border:bd,borderRadius:5,padding:'5px 7px',cursor:clickable?'pointer':'default'}}>
@@ -84,7 +89,7 @@ function SigPill({sig,label,dark=false,signalIndex,onRetry,loading=false}) {
         <div style={{fontSize:7.5,color:dark?'rgba(154,152,144,0.75)':C.txLight,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.06em',lineHeight:1}}>{label}</div>
       </div>
       <div style={{fontSize:10,fontWeight:500,color:col,fontFamily:MONO,lineHeight:1.3,wordBreak:'break-word'}}>
-        {loading?'loading…':!hasVal?'no data — tap to retry':sig.value}
+        {loading ? 'loading…' : hasVal ? sig.value : '— tap to retry'}
       </div>
     </div>
   );
