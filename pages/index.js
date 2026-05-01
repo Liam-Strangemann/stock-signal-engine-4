@@ -243,8 +243,8 @@ function BatchProgress({completed,total}) {
   );
 }
 
-async function callAnalyse(tickers) {
-  const res = await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers})});
+async function callAnalyse(tickers, universePECache = {}) {
+  const res = await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers, universePECache})});
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -279,6 +279,8 @@ export default function Home() {
   const rescanStartRef = useRef(Date.now());
   const tickersRef     = useRef([]);
   const allStocksRef   = useRef(new Map());
+  // Accumulated PE data from all universe scans — used as free peer PE lookup
+  const universePECacheRef = useRef({});
   const totalPages     = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
 
   const recomputeTopPicks = useCallback((promoted=new Set())=>{
@@ -320,14 +322,17 @@ export default function Home() {
   const runBatch = useCallback(async(batchIndex,isBackground=false,refresh=false)=>{
     try {
       const batchData = await fetchBatch(batchIndex,refresh);
-      const {candidates=[],stockMeta={},allScored=[]} = batchData;
+      const {candidates=[],stockMeta={},allScored=[],universePECache={}} = batchData;
       if (!candidates.length) return;
+      // Merge universe PE data into our cache
+      Object.assign(universePECacheRef.current, universePECache || {});
       const pool = allStocksRef.current;
       const toAnalyse = isBackground
         ? candidates.filter(t=>{const ex=pool.get(t);const qs=(allScored||[]).find(s=>s.symbol===t)?.qs||0;return !ex||qs>(ex._qs||0);}).slice(0,10)
         : candidates;
       if (!toAnalyse.length) return;
-      const data = await callAnalyse(toAnalyse);
+      // Pass the accumulated PE cache so analyse.js can use it for peer PEs
+      const data = await callAnalyse(toAnalyse, universePECacheRef.current);
       const top9 = Array.from(pool.values()).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0)).slice(0,TOTAL_PICKS);
       const worstScore = top9.length>=TOTAL_PICKS?(top9[TOTAL_PICKS-1]?.score||0):0;
       const promoted = new Set();
@@ -399,7 +404,7 @@ export default function Home() {
   const scan=useCallback(async(tickers)=>{
     setScanning(true);setStatus(`Analysing ${tickers.length} tickers…`);
     try{
-      const data=await callAnalyse(tickers);
+      const data=await callAnalyse(tickers, universePECacheRef.current);
       const arr=Object.values(data.results||{}).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
       setResults(arr);setUpdatedAt(new Date().toLocaleTimeString());setStatus('');
       mergePool(data.results||{},'custom');
