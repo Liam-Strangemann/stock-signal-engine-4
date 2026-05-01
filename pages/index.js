@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-// Inject Google Fonts — only correct method without Next.js Head
 function useFonts() {
   useEffect(() => {
     if (document.getElementById('se-gf')) return;
@@ -22,7 +21,7 @@ const PRESETS = {
   'Dividend':     'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
 
-const SIG_LABELS = ['EPS beat','PE vs hist','vs 50d MA','Insider','Analyst','PE vs peers'];
+const SIG_LABELS = ['EPS beat','PE vs hist','vs 50d MA','Insider','Analyst upside','PE vs peers'];
 
 const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA,F,GM'.split(','));
 
@@ -44,8 +43,8 @@ const MONO  = "'DM Mono','Courier New',monospace";
 const RANK_LABELS   = ['I','II','III','IV','V','VI','VII','VIII','IX'];
 const PAGE_SIZE     = 3;
 const TOTAL_PICKS   = 9;
-const RESCAN_MS     = 5 * 60 * 1000;
-const TOTAL_BATCHES = 5;
+const TOTAL_BATCHES = 10;
+const RESCAN_MS     = 5 * 60 * 1000; // full rescan every 5 minutes
 
 function scoreColor(sc, dark=false) {
   if (sc>=6) return dark?'#7EC87A':'#2D6E2A';
@@ -72,20 +71,18 @@ function ScoreDots({score,max=6,dark=false}) {
   );
 }
 
-// KEY FIX: pill shows ANY non-empty string from the backend.
-// Only shows "retry" when value is genuinely absent (null, undefined, '').
 function SigPill({sig, label, dark=false, signalIndex, onRetry, loading=false}) {
-  const val = sig?.value;
+  const val    = sig?.value;
+  // Show ANY non-empty string from the backend — never filter by content
   const hasVal = !loading && val != null && val !== '';
   const p = sig?.status === 'pass';
   const f = sig?.status === 'fail';
-
-  const bg  = !hasVal?( dark?C.dkAmberBg:C.amberBg):dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
-  const col = !hasVal?(dark?C.dkAmber:C.amber):dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
-  const bdc = !hasVal?(dark?C.dkAmberBd:C.amberBd):dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
-  const bd  = !hasVal?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
-  const clickable = !hasVal && !loading && onRetry;
-
+  const empty  = !hasVal && !loading;
+  const bg  = empty?(dark?C.dkAmberBg:C.amberBg):dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
+  const col = empty?(dark?C.dkAmber:C.amber):dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
+  const bdc = empty?(dark?C.dkAmberBd:C.amberBd):dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
+  const bd  = empty?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
+  const clickable = empty && !loading && onRetry;
   return (
     <div onClick={clickable?()=>onRetry(signalIndex):undefined}
       title={clickable?`Retry ${label}`:undefined}
@@ -97,7 +94,7 @@ function SigPill({sig, label, dark=false, signalIndex, onRetry, loading=false}) 
         <div style={{fontSize:7.5,color:dark?'rgba(154,152,144,0.75)':C.txLight,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.06em',lineHeight:1}}>{label}</div>
       </div>
       <div style={{fontSize:10,fontWeight:500,color:col,fontFamily:MONO,lineHeight:1.3,wordBreak:'break-word'}}>
-        {loading ? 'loading…' : hasVal ? val : '— tap to retry'}
+        {loading?'loading…':hasVal?val:'— tap to retry'}
       </div>
     </div>
   );
@@ -168,13 +165,10 @@ function ArrowBtn({dir,onClick,disabled}) {
   return (
     <button onClick={onClick} disabled={disabled}
       style={{width:40,height:40,borderRadius:'50%',background:disabled?'rgba(58,56,50,0.5)':C.deepBg,border:`1px solid ${disabled?'rgba(184,160,112,0.15)':C.gold}`,color:disabled?'rgba(184,160,112,0.2)':C.gold,display:'flex',alignItems:'center',justifyContent:'center',cursor:disabled?'not-allowed':'pointer',padding:0,flexShrink:0}}>
-      {dir==='left'
-        ?<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>
-        :<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>}
+      {dir==='left'?<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>:<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>}
     </button>
   );
 }
-
 function PageDots({total,active,onChange}) {
   return (
     <div style={{display:'flex',gap:6,alignItems:'center'}}>
@@ -229,22 +223,22 @@ function ResultCard({stock,rank,onSignalRetry}) {
   );
 }
 
-function BatchProgress({completed,total}) {
+function BatchProgress({completed,total,scanned,universe}) {
   const pct=total>0?Math.round((completed/total)*100):0;
   return (
     <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16}}>
       <div style={{flex:1,height:2,background:'rgba(95,94,86,0.2)',borderRadius:1,overflow:'hidden'}}>
         <div style={{height:'100%',width:`${pct}%`,background:C.gold,transition:'width 0.5s ease',borderRadius:1}}/>
       </div>
-      <span style={{fontSize:9,color:C.txLight,fontFamily:MONO,whiteSpace:'nowrap',minWidth:56}}>
-        {pct < 100 ? `${pct}% scanned` : '100% scanned'}
+      <span style={{fontSize:9,color:C.txLight,fontFamily:MONO,whiteSpace:'nowrap',minWidth:80,textAlign:'right'}}>
+        {scanned > 0 ? `${scanned.toLocaleString()} / ${universe.toLocaleString()} scanned` : `${pct}% scanned`}
       </span>
     </div>
   );
 }
 
-async function callAnalyse(tickers, universePECache = {}) {
-  const res = await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers, universePECache})});
+async function callAnalyse(tickers, universePECache={}) {
+  const res = await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers,universePECache})});
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -265,22 +259,24 @@ export default function Home() {
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
-  const [topStatus,setTopStatus]       = useState('Loading megacaps…');
+  const [topStatus,setTopStatus]       = useState('Loading…');
   const [batchesCompleted,setBatchesCompleted] = useState(0);
+  const [totalScanned,setTotalScanned]         = useState(0);
+  const [totalUniverse,setTotalUniverse]       = useState(1500);
   const [batchScanning,setBatchScanning]       = useState(true);
   const [newlyPromoted,setNewlyPromoted]       = useState(new Set());
   const [carouselPage,setCarouselPage] = useState(0);
-  const [transitioning,setTransitioning] = useState(false);
-  const [animPhase,setAnimPhase]         = useState('idle');
-  const [rescanCountdown,setRescanCountdown] = useState('');
+  const [transitioning,setTransitioning]=useState(false);
+  const [animPhase,setAnimPhase]       = useState('idle');
+  const [rescanCountdown,setRescanCountdown]= useState('');
 
+  const scanLoopRef    = useRef(null);  // controls the background loop
   const timerRef       = useRef(null);
-  const rescanTimerRef = useRef(null);
   const rescanStartRef = useRef(Date.now());
   const tickersRef     = useRef([]);
   const allStocksRef   = useRef(new Map());
-  // Accumulated PE data from all universe scans — used as free peer PE lookup
-  const universePECacheRef = useRef({});
+  // Accumulated PE data from all universe scans — free peer PE for analyse.js
+  const universePERef  = useRef({});
   const totalPages     = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
 
   const recomputeTopPicks = useCallback((promoted=new Set())=>{
@@ -319,57 +315,90 @@ export default function Home() {
     window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
   },[nextPage,prevPage]);
 
-  const runBatch = useCallback(async(batchIndex,isBackground=false,refresh=false)=>{
+  // Run a single batch: quick-scan → pick candidates → full analyse
+  const runBatch = useCallback(async(batchIndex, isFirst=false, refresh=false)=>{
     try {
-      const batchData = await fetchBatch(batchIndex,refresh);
-      const {candidates=[],stockMeta={},allScored=[],universePECache={}} = batchData;
+      const batchData = await fetchBatch(batchIndex, refresh);
+      const {candidates=[], stockMeta={}, allScored=[], totalScanned:bScanned=0, totalUniverse:tu, universePECache={}} = batchData;
+
+      // Merge PE data into running cache
+      Object.assign(universePERef.current, universePECache);
+      if (tu) setTotalUniverse(tu);
+      setTotalScanned(prev => prev + bScanned);
+
       if (!candidates.length) return;
-      // Merge universe PE data into our cache
-      Object.assign(universePECacheRef.current, universePECache || {});
+
       const pool = allStocksRef.current;
-      const toAnalyse = isBackground
-        ? candidates.filter(t=>{const ex=pool.get(t);const qs=(allScored||[]).find(s=>s.symbol===t)?.qs||0;return !ex||qs>(ex._qs||0);}).slice(0,10)
-        : candidates;
+      // First batch: analyse all candidates. Background: only new/better ones
+      const toAnalyse = isFirst
+        ? candidates
+        : candidates.filter(t => {
+            const ex  = pool.get(t);
+            const qs  = (allScored||[]).find(s=>s.symbol===t)?.qs||0;
+            return !ex || qs > (ex._qs||0);
+          }).slice(0, 12);
+
       if (!toAnalyse.length) return;
-      // Pass the accumulated PE cache so analyse.js can use it for peer PEs
-      const data = await callAnalyse(toAnalyse, universePECacheRef.current);
-      const top9 = Array.from(pool.values()).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0)).slice(0,TOTAL_PICKS);
-      const worstScore = top9.length>=TOTAL_PICKS?(top9[TOTAL_PICKS-1]?.score||0):0;
+
+      // Pass accumulated PE cache so peers are resolved for free
+      const data = await callAnalyse(toAnalyse, universePERef.current);
+
+      const top9 = Array.from(pool.values())
+        .filter(s=>s&&!s.error&&s.score!=null)
+        .sort((a,b)=>(b.score||0)-(a.score||0))
+        .slice(0, TOTAL_PICKS);
+      const worstScore = top9.length >= TOTAL_PICKS ? (top9[TOTAL_PICKS-1]?.score||0) : 0;
       const promoted = new Set();
+
       for(const [ticker,stock] of Object.entries(data.results||{})){
         if(!stock||stock.error) continue;
-        const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
-        const exchange=(stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL')?stock.exchange:(stockMeta[ticker]?.exchange||stock.exchange);
+        const qs = (allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
+        const exchange = (stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL')
+          ? stock.exchange : (stockMeta[ticker]?.exchange||stock.exchange);
         pool.set(ticker,{...stock,exchange,_qs:qs,_source:'auto'});
-        if(isBackground&&(stock.score||0)>worstScore) promoted.add(ticker);
+        if(!isFirst && (stock.score||0) > worstScore) promoted.add(ticker);
       }
       recomputeTopPicks(promoted);
     } catch(_) {}
   },[recomputeTopPicks]);
 
-  const runAllBatches = useCallback(async(refresh=false)=>{
+  // The main scanning loop — runs all 10 batches, then repeats every 5 min
+  const runScanLoop = useCallback(async(refresh=false)=>{
     setBatchScanning(true);
-    setTopStatus('Loading megacaps…');
-    await runBatch(0,false,refresh);
+    if(refresh) setTotalScanned(0);
+
+    setTopStatus('Loading NASDAQ megacaps…');
+    await runBatch(0, true, refresh);  // first=true: analyse ALL candidates
     setBatchesCompleted(1);
-    setTopStatus('Megacaps loaded · scanning remaining sectors…');
-    for(let i=1;i<TOTAL_BATCHES;i++){
-      await runBatch(i,true,refresh);
+    setTopStatus(`Scanning remaining sectors…`);
+
+    for(let i=1; i<TOTAL_BATCHES; i++){
+      if(!scanLoopRef.current) break; // cancelled
+      await runBatch(i, false, refresh);
       setBatchesCompleted(i+1);
-      if(i<TOTAL_BATCHES-1) setTopStatus(`Scanning sectors… (${i+1}/${TOTAL_BATCHES})`);
-      await new Promise(r=>setTimeout(r,400));
+      setTopStatus(`Scanning sector ${i+1}/${TOTAL_BATCHES}…`);
+      // Small pause between batches to avoid Yahoo rate limits
+      await new Promise(r => setTimeout(r, 300));
     }
-    setTopStatus(`Full universe scanned · ${new Date().toLocaleTimeString()}`);
+
+    setTopStatus(`Universe scanned · ${new Date().toLocaleTimeString()}`);
     setBatchScanning(false);
+    rescanStartRef.current = Date.now();
+
+    // Schedule next full scan
+    scanLoopRef.current = setTimeout(()=>{
+      runScanLoop(true);
+    }, RESCAN_MS);
   },[runBatch]);
 
   useEffect(()=>{
-    let live=true;
-    runAllBatches();
-    rescanTimerRef.current=setInterval(()=>{if(live)runAllBatches(true);},RESCAN_MS);
-    rescanStartRef.current=Date.now();
-    return()=>{live=false;clearInterval(rescanTimerRef.current);};
-  },[runAllBatches]);
+    scanLoopRef.current = true; // mark as active
+    runScanLoop(false);
+    return()=>{
+      scanLoopRef.current = null;
+      clearTimeout(scanLoopRef.current);
+    };
+  },[runScanLoop]);
 
   useEffect(()=>{
     if(newlyPromoted.size===0) return;
@@ -390,7 +419,7 @@ export default function Home() {
     const mark=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:''}))];sigs[signalIndex]={...(sigs[signalIndex]||{}),_loading:true};return{...s,signals:sigs};};
     updatePool(ticker,mark);setResults(prev=>prev.map(s=>s?.ticker===ticker?mark(s):s));
     try{
-      const data=await callAnalyse([ticker]);
+      const data=await callAnalyse([ticker], universePERef.current);
       const fresh=data?.results?.[ticker];
       const ns=fresh?.signals?.[signalIndex]||{status:'neutral',value:'No data'};
       const apply=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:''}))];sigs[signalIndex]={...ns,_loading:false};return{...s,signals:sigs,score:sigs.filter(x=>x.status==='pass').length};};
@@ -404,7 +433,7 @@ export default function Home() {
   const scan=useCallback(async(tickers)=>{
     setScanning(true);setStatus(`Analysing ${tickers.length} tickers…`);
     try{
-      const data=await callAnalyse(tickers, universePECacheRef.current);
+      const data=await callAnalyse(tickers, universePERef.current);
       const arr=Object.values(data.results||{}).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
       setResults(arr);setUpdatedAt(new Date().toLocaleTimeString());setStatus('');
       mergePool(data.results||{},'custom');
@@ -441,8 +470,7 @@ export default function Home() {
         ::selection{background:${C.gold};color:#2C2C2A;}
         input::placeholder{color:${C.txLight};}input:focus{outline:none;}
         button{cursor:pointer;transition:opacity 0.14s,all 0.2s;}
-        button:not(:disabled):hover{opacity:0.76;}
-        button:disabled{opacity:0.38;cursor:not-allowed;}
+        button:not(:disabled):hover{opacity:0.76;}button:disabled{opacity:0.38;cursor:not-allowed;}
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
         @keyframes fadeUpNew{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
         @keyframes shimmer{0%,100%{opacity:0.5}50%{opacity:0.85}}
@@ -463,11 +491,11 @@ export default function Home() {
           </div>
           <div style={{textAlign:'right',fontSize:10,color:C.txLight,fontFamily:MONO,lineHeight:1.8}}>
             <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'flex-end'}}>
-              <div style={{width:6,height:6,borderRadius:'50%',background:batchScanning||scanning?C.gold:C.txLight}}/>
+              <div style={{width:6,height:6,borderRadius:'50%',background:batchScanning||scanning?C.gold:C.txLight,animation:batchScanning?'shimmer 1.5s ease-in-out infinite':undefined}}/>
               <span style={{color:'#F1EFE8'}}>{scanning?'Scanning…':batchScanning?'Discovering…':'Ready'}</span>
             </div>
             {updatedAt&&<div>Updated {updatedAt}</div>}
-            <div style={{fontSize:9,color:'rgba(154,152,144,0.5)'}}>rescan in {rescanCountdown}</div>
+            <div style={{fontSize:9,color:'rgba(154,152,144,0.5)'}}>next rescan {rescanCountdown}</div>
           </div>
         </div>
       </div>
@@ -482,7 +510,7 @@ export default function Home() {
             <div style={{fontSize:9.5,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',textTransform:'uppercase',whiteSpace:'nowrap'}}>{topStatus}</div>
           </div>
 
-          <BatchProgress completed={batchesCompleted} total={TOTAL_BATCHES}/>
+          <BatchProgress completed={batchesCompleted} total={TOTAL_BATCHES} scanned={totalScanned} universe={totalUniverse}/>
 
           <div style={{position:'relative'}}>
             <div style={{position:'absolute',left:-20,top:'50%',transform:'translateY(-50%)',zIndex:10}}>
@@ -562,7 +590,7 @@ export default function Home() {
           <div style={{display:'flex',gap:8,marginTop:24,paddingTop:20,borderTop:`0.5px solid ${C.borderDk}`,flexWrap:'wrap',alignItems:'center'}}>
             <span style={{fontSize:10,color:C.txLight,fontFamily:MONO,flex:1,letterSpacing:'0.06em'}}>{filtered.length} securities · export</span>
             <button onClick={()=>{
-              const hdr=['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs50dMA','Insider','Analyst','PE vs peers','Summary'];
+              const hdr=['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs MA','Insider','Analyst','PE vs peers','Summary'];
               const rows=filtered.map((r,i)=>{const g=r.signals||[];return[i+1,r.ticker,`"${(r.company||'').replace(/"/g,'""')}"`,r.score||0,r.price||'',r.change||'',r.marketCap||'',g[0]?.value||'',g[1]?.value||'',g[2]?.value||'',g[3]?.value||'',g[4]?.value||'',g[5]?.value||'',`"${(r.summary||'').replace(/"/g,'""')}"`].join(',');});
               const blob=new Blob([[hdr.join(',')].concat(rows).join('\n')],{type:'text/csv'});
               const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`signals_${new Date().toISOString().slice(0,10)}.csv`;a.click();
