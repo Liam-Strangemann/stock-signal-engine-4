@@ -190,6 +190,10 @@ export default async function handler(req, res) {
     totalScanned, totalBatches:BATCHES.length,
     totalUniverse:TOTAL_UNIVERSE,
     batchIndex:batchIndices[0],
+    // PE data already fetched for every ticker in this batch — free peer PE lookup
+    universePECache: Object.fromEntries(
+      allScored.map(s => [s.symbol, s.pe]).filter(([,pe]) => pe > 0 && pe < 300)
+    ),
     generatedAt:new Date().toISOString(),
   });
 }
