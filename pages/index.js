@@ -1,20 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-// Inject Google Fonts properly — @import inside <style> breaks if not first rule.
-// A <link> element appended to <head> always works.
 function useFonts() {
   useEffect(() => {
-    const id = 'se-gfonts';
+    const id = 'se-gf';
     if (document.getElementById(id)) return;
     const l = document.createElement('link');
-    l.id   = id;
-    l.rel  = 'preconnect';
-    l.href = 'https://fonts.googleapis.com';
+    l.id = id; l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400;500&display=swap';
     document.head.appendChild(l);
-    const l2 = document.createElement('link');
-    l2.rel  = 'stylesheet';
-    l2.href = 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400;500&display=swap';
-    document.head.appendChild(l2);
   }, []);
 }
 
@@ -48,11 +41,11 @@ const C = {
 const FONTS = "'Cormorant Garamond','Georgia',serif";
 const SANS  = "'DM Sans','Helvetica Neue',sans-serif";
 const MONO  = "'DM Mono','Courier New',monospace";
-
-const RANK_LABELS   = ['I','II','III','IV','V','VI','VII','VIII','IX'];
-const PAGE_SIZE     = 3;
-const TOTAL_PICKS   = 9;
-const RESCAN_MS     = 5 * 60 * 1000;
+const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
+const PAGE_SIZE   = 3;
+const TOTAL_PICKS = 9;
+const RESCAN_MS   = 5 * 60 * 1000;
+const TOTAL_BATCHES = 5; // matches top3.js BATCHES.length
 
 function scoreColor(sc, dark=false) {
   if (sc>=6) return dark?'#7EC87A':'#2D6E2A';
@@ -82,8 +75,7 @@ function SigPill({sig,label,dark=false,signalIndex,onRetry,loading=false}) {
   const bd  =!hasVal&&!loading?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
   const clickable=!hasVal&&!loading&&onRetry;
   return (
-    <div onClick={clickable?()=>onRetry(signalIndex):undefined}
-      title={clickable?`Retry ${label}`:undefined}
+    <div onClick={clickable?()=>onRetry(signalIndex):undefined} title={clickable?`Retry ${label}`:undefined}
       style={{background:bg,border:bd,borderRadius:5,padding:'5px 7px',cursor:clickable?'pointer':'default'}}>
       <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
         {loading
@@ -161,14 +153,14 @@ function FeatureCard({stock,rank,onSignalRetry,isNew=false}) {
 
 function ArrowBtn({dir,onClick,disabled}) {
   return (
-    <button onClick={onClick} disabled={disabled} aria-label={dir==='left'?'Previous':'Next'}
+    <button onClick={onClick} disabled={disabled}
       style={{width:40,height:40,borderRadius:'50%',background:disabled?'rgba(58,56,50,0.5)':C.deepBg,border:`1px solid ${disabled?'rgba(184,160,112,0.15)':C.gold}`,color:disabled?'rgba(184,160,112,0.2)':C.gold,display:'flex',alignItems:'center',justifyContent:'center',cursor:disabled?'not-allowed':'pointer',padding:0,flexShrink:0}}>
       {dir==='left'?<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>:<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>}
     </button>
   );
 }
 function PageDots({total,active,onChange}) {
-  return <div style={{display:'flex',gap:6,alignItems:'center'}}>{Array.from({length:total}).map((_,i)=><button key={i} onClick={()=>onChange(i)} aria-label={`Page ${i+1}`} style={{width:i===active?20:6,height:6,borderRadius:3,background:i===active?C.gold:'rgba(184,160,112,0.3)',border:'none',padding:0,cursor:'pointer',transition:'all 0.25s ease'}}/>)}</div>;
+  return <div style={{display:'flex',gap:6,alignItems:'center'}}>{Array.from({length:total}).map((_,i)=><button key={i} onClick={()=>onChange(i)} style={{width:i===active?20:6,height:6,borderRadius:3,background:i===active?C.gold:'rgba(184,160,112,0.3)',border:'none',padding:0,cursor:'pointer',transition:'all 0.25s ease'}}/>)}</div>;
 }
 
 function ResultCard({stock,rank,onSignalRetry}) {
@@ -214,13 +206,33 @@ function ResultCard({stock,rank,onSignalRetry}) {
   );
 }
 
-// ── Core fetch ────────────────────────────────────────────────────────────────
+// ── Batch progress bar ────────────────────────────────────────────────────────
+function BatchProgress({completed,total,scanning}) {
+  const pct = total > 0 ? Math.round((completed/total)*100) : 0;
+  return (
+    <div style={{display:'flex',alignItems:'center',gap:8}}>
+      <div style={{flex:1,height:2,background:'rgba(95,94,86,0.2)',borderRadius:1,overflow:'hidden'}}>
+        <div style={{height:'100%',width:`${pct}%`,background:C.gold,transition:'width 0.4s ease',borderRadius:1}}/>
+      </div>
+      <span style={{fontSize:9,color:C.txLight,fontFamily:MONO,whiteSpace:'nowrap',minWidth:60}}>
+        {scanning?`batch ${completed}/${total}`:`${pct}% scanned`}
+      </span>
+    </div>
+  );
+}
+
 async function callAnalyse(tickers) {
   const res = await fetch('/api/analyse', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({tickers}),
   });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchBatch(batchIndex, refresh=false) {
+  const url = `/api/top3?batch=${batchIndex}${refresh?'&refresh=1':''}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -236,8 +248,9 @@ export default function Home() {
   const [updatedAt,setUpdatedAt]       = useState('');
   const [activePreset,setActivePreset] = useState('');
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
-  const [topStatus,setTopStatus]       = useState('Scanning ~1,800 securities…');
-  const [totalUniverse,setTotalUniverse]= useState(1800);
+  const [topStatus,setTopStatus]       = useState('Loading megacaps…');
+  const [batchesCompleted,setBatchesCompleted] = useState(0);
+  const [batchScanning,setBatchScanning] = useState(false);
   const [newlyPromoted,setNewlyPromoted]= useState(new Set());
   const [carouselPage,setCarouselPage] = useState(0);
   const [transitioning,setTransitioning]=useState(false);
@@ -287,60 +300,98 @@ export default function Home() {
     window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
   },[nextPage,prevPage]);
 
-  // ── Rolling rescan ────────────────────────────────────────────────────────
-  const runRollingRescan = useCallback(async()=>{
-    try{
-      setTopStatus('Re-scanning…');
-      const sr=await fetch('/api/top3?refresh=1');
-      if(!sr.ok) return;
-      const {candidates=[],allScored=[],stockMeta={},totalUniverse:tu}=await sr.json();
-      if(tu) setTotalUniverse(tu);
-      const pool=allStocksRef.current;
-      const newC=(allScored||[]).filter(s=>{const ex=pool.get(s.symbol);return !ex||s.qs>(ex._qs||0);}).slice(0,3).map(s=>s.symbol);
-      if(!newC.length){setTopStatus(`${(tu||totalUniverse).toLocaleString()} securities screened`);return;}
-      setTopStatus(`Analysing ${newC.length} new candidates…`);
-      const data=await callAnalyse(newC);
-      const top9=Array.from(pool.values()).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0)).slice(0,TOTAL_PICKS);
-      const worstScore=top9.length>=TOTAL_PICKS?(top9[TOTAL_PICKS-1]?.score||0):0;
-      const promoted=new Set();
-      for(const [ticker,stock] of Object.entries(data.results||{})){
-        if(!stock||stock.error) continue;
-        const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
-        if((stock.score||0)>worstScore) promoted.add(ticker);
-        pool.set(ticker,{...stock,_qs:qs,_source:'auto',...(stockMeta[ticker]?.exchange?{exchange:stockMeta[ticker].exchange}:{})});
+  // ── Run one batch: fetch quick scores → pick top candidates → analyse ──────
+  const runBatch = useCallback(async(batchIndex, isBackground=false, refresh=false)=>{
+    try {
+      const batchData = await fetchBatch(batchIndex, refresh);
+      const { candidates=[], stockMeta={}, allScored=[], totalUniverse } = batchData;
+      if (!candidates.length) return;
+
+      // Check which candidates are new or have a better quickScore than what's in pool
+      const pool = allStocksRef.current;
+      const newCandidates = isBackground
+        ? candidates.filter(t => {
+            const ex = pool.get(t);
+            const qs = (allScored||[]).find(s=>s.symbol===t)?.qs||0;
+            return !ex || qs > (ex._qs||0);
+          }).slice(0, 10) // limit background analysis to 10 per batch
+        : candidates; // first batch always analyses all
+
+      if (!newCandidates.length) return;
+
+      const data = await callAnalyse(newCandidates);
+      const currentTop9 = Array.from(pool.values())
+        .filter(s=>s&&!s.error&&s.score!=null)
+        .sort((a,b)=>(b.score||0)-(a.score||0))
+        .slice(0, TOTAL_PICKS);
+      const worstScore = currentTop9.length >= TOTAL_PICKS ? (currentTop9[TOTAL_PICKS-1]?.score||0) : 0;
+
+      const promoted = new Set();
+      for (const [ticker,stock] of Object.entries(data.results||{})) {
+        if (!stock||stock.error) continue;
+        const qs = (allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
+        const exchange = (stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL') ? stock.exchange : (stockMeta[ticker]?.exchange||stock.exchange);
+        const enriched = {...stock, exchange, _qs:qs, _source:'auto'};
+        if (isBackground && (stock.score||0) > worstScore) promoted.add(ticker);
+        pool.set(ticker, enriched);
       }
       recomputeTopPicks(promoted);
-      setTopStatus(`${(tu||totalUniverse).toLocaleString()} securities screened · ${new Date().toLocaleTimeString()}`);
-    }catch(_){setTopStatus(`${totalUniverse.toLocaleString()} securities screened`);}
-  },[recomputeTopPicks,totalUniverse]);
+      return promoted;
+    } catch(_) { return new Set(); }
+  }, [recomputeTopPicks]);
 
-  // ── Boot: load top3 candidates then analyse ───────────────────────────────
+  // ── Boot: batch 0 immediately, then batches 1-N in background ────────────
   useEffect(()=>{
-    let live=true;
+    let live = true;
+    setBatchScanning(true);
+
     (async()=>{
-      try{
-        const sr=await fetch('/api/top3');
-        if(!live||!sr.ok){if(live)setTopStatus('Could not load top picks');return;}
-        const {candidates=[],totalScanned,totalUniverse:tu,stockMeta={},allScored=[]}=await sr.json();
-        if(tu) setTotalUniverse(tu);
-        if(!live||!candidates.length){if(live)setTopStatus('No candidates found');return;}
-        setTopStatus(`Analysing ${candidates.length} picks…`);
-        const data=await callAnalyse(candidates);
-        if(!live) return;
-        const merged=Object.fromEntries(Object.entries(data.results||{}).map(([ticker,stock])=>{
-          if(!stock) return [ticker,stock];
-          const exchange=(stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL')?stock.exchange:(stockMeta[ticker]?.exchange||stock.exchange);
-          const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
-          return [ticker,{...stock,exchange,_qs:qs}];
-        }));
-        mergeIntoPool(merged,'auto');
-        setTopStatus(`${(tu||totalScanned||candidates.length).toLocaleString()} of ${(tu||1800).toLocaleString()} securities screened`);
-      }catch(e){if(live)setTopStatus('Could not load top picks');}
+      // Batch 0 — megacaps — runs immediately, results appear fast
+      setTopStatus('Loading megacaps…');
+      await runBatch(0, false);
+      if (!live) return;
+      setBatchesCompleted(1);
+      setTopStatus('Megacaps loaded · scanning remaining sectors…');
+
+      // Batches 1-N run sequentially in background
+      for (let i = 1; i < TOTAL_BATCHES; i++) {
+        if (!live) break;
+        await runBatch(i, true); // isBackground=true
+        if (!live) break;
+        setBatchesCompleted(i+1);
+        if (i === TOTAL_BATCHES-1) {
+          setTopStatus(`Full universe scanned · ${new Date().toLocaleTimeString()}`);
+          setBatchScanning(false);
+        } else {
+          setTopStatus(`Scanning sectors… (${i+1}/${TOTAL_BATCHES})`);
+        }
+        // Small pause between background batches to avoid rate limits
+        await new Promise(r => setTimeout(r, 500));
+      }
     })();
-    rescanTimerRef.current=setInterval(()=>{if(live)runRollingRescan();},RESCAN_MS);
-    rescanStartRef.current=Date.now();
+
+    // Re-scan every 5 minutes starting with batch 0 then background
+    rescanTimerRef.current = setInterval(async()=>{
+      if (!live) return;
+      setBatchScanning(true);
+      setTopStatus('Refreshing…');
+      await runBatch(0, false, true);
+      if (!live) return;
+      setBatchesCompleted(1);
+      for (let i = 1; i < TOTAL_BATCHES; i++) {
+        if (!live) break;
+        await runBatch(i, true, true);
+        if (!live) break;
+        setBatchesCompleted(i+1);
+        await new Promise(r => setTimeout(r, 500));
+      }
+      setTopStatus(`Refreshed · ${new Date().toLocaleTimeString()}`);
+      setBatchScanning(false);
+    }, RESCAN_MS);
+    rescanStartRef.current = Date.now();
+
     return()=>{live=false;clearInterval(rescanTimerRef.current);};
-  },[mergeIntoPool,runRollingRescan]);
+  },[runBatch]);
 
   useEffect(()=>{
     if(newlyPromoted.size===0) return;
@@ -352,12 +403,11 @@ export default function Home() {
     const tick=setInterval(()=>{
       const rem=RESCAN_MS-((Date.now()-rescanStartRef.current)%RESCAN_MS);
       const m=Math.floor(rem/60000),s=Math.floor((rem%60000)/1000);
-      setRescanCountdown(`next rescan ${m}:${String(s).padStart(2,'0')}`);
+      setRescanCountdown(`${m}:${String(s).padStart(2,'0')}`);
     },1000);
     return()=>clearInterval(tick);
   },[]);
 
-  // ── Signal retry ──────────────────────────────────────────────────────────
   const retrySignal=useCallback(async(ticker,signalIndex)=>{
     const markLoad=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:'No data'}))];sigs[signalIndex]={...(sigs[signalIndex]||{}),_loading:true};return{...s,signals:sigs};};
     updateStockInPool(ticker,markLoad);setResults(prev=>prev.map(s=>s?.ticker===ticker?markLoad(s):s));
@@ -373,7 +423,6 @@ export default function Home() {
     }
   },[updateStockInPool]);
 
-  // ── Custom scan ───────────────────────────────────────────────────────────
   const scan=useCallback(async(tickers)=>{
     setScanning(true);setStatus(`Analysing ${tickers.length} securities…`);
     try{
@@ -389,8 +438,7 @@ export default function Home() {
     const tickers=input.split(/[\s,;]+/).map(t=>t.toUpperCase().trim()).filter(Boolean).slice(0,20);
     if(!tickers.length) return;
     tickersRef.current=tickers;clearInterval(timerRef.current);setResults([]);
-    scan(tickers);
-    timerRef.current=setInterval(()=>scan(tickersRef.current),5*60*1000);
+    scan(tickers);timerRef.current=setInterval(()=>scan(tickersRef.current),5*60*1000);
   }
   useEffect(()=>()=>clearInterval(timerRef.current),[]);
 
@@ -413,8 +461,7 @@ export default function Home() {
         *{box-sizing:border-box;margin:0;padding:0;}
         html,body{-webkit-font-smoothing:antialiased;background:${C.pageBg};}
         ::selection{background:${C.gold};color:#2C2C2A;}
-        input::placeholder{color:${C.txLight};}
-        input:focus{outline:none;}
+        input::placeholder{color:${C.txLight};}input:focus{outline:none;}
         button{cursor:pointer;transition:opacity 0.14s,all 0.2s;}
         button:not(:disabled):hover{opacity:0.76;}
         button:disabled{opacity:0.38;cursor:not-allowed;}
@@ -438,11 +485,11 @@ export default function Home() {
           </div>
           <div style={{textAlign:'right',fontSize:10,color:C.txLight,fontFamily:MONO,lineHeight:1.8}}>
             <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'flex-end'}}>
-              <div style={{width:6,height:6,borderRadius:'50%',background:scanning?C.gold:results.length?C.gold:C.txLight}}/>
-              <span style={{color:'#F1EFE8'}}>{scanning?'Scanning…':results.length?'Live':'Ready'}</span>
+              <div style={{width:6,height:6,borderRadius:'50%',background:scanning||batchScanning?C.gold:allStocksRef.current.size?C.gold:C.txLight,animation:batchScanning?'shimmer 1.5s ease-in-out infinite':undefined}}/>
+              <span style={{color:'#F1EFE8'}}>{scanning?'Scanning…':batchScanning?'Discovering…':'Ready'}</span>
             </div>
             {updatedAt&&<div>Updated {updatedAt}</div>}
-            {rescanCountdown&&<div style={{fontSize:9,color:'rgba(154,152,144,0.5)'}}>{rescanCountdown}</div>}
+            <div style={{fontSize:9,color:'rgba(154,152,144,0.5)'}}>rescan in {rescanCountdown}</div>
           </div>
         </div>
       </div>
@@ -451,13 +498,15 @@ export default function Home() {
 
         {/* Top Picks */}
         <div style={{marginBottom:16}}>
-          <div style={{display:'flex',alignItems:'baseline',gap:16,marginBottom:20}}>
+          <div style={{display:'flex',alignItems:'baseline',gap:16,marginBottom:12}}>
             <h2 style={{fontSize:36,fontFamily:FONTS,fontWeight:600,color:C.tx,letterSpacing:'0.02em'}}>Top Picks Today</h2>
             <div style={{height:'0.5px',flex:1,background:C.borderDk}}/>
-            <div style={{fontSize:9.5,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',textTransform:'uppercase',whiteSpace:'nowrap'}}>
-              {topStatus}
-            </div>
+            <div style={{fontSize:9.5,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',textTransform:'uppercase',whiteSpace:'nowrap'}}>{topStatus}</div>
           </div>
+          <div style={{marginBottom:16}}>
+            <BatchProgress completed={batchesCompleted} total={TOTAL_BATCHES} scanning={batchScanning}/>
+          </div>
+
           <div style={{position:'relative'}}>
             <div style={{position:'absolute',left:-20,top:'50%',transform:'translateY(-50%)',zIndex:10}}>
               <ArrowBtn dir="left" onClick={prevPage} disabled={carouselPage===0}/>
