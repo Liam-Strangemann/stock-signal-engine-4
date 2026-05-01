@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+// Inject Google Fonts — only correct method without Next.js Head
 function useFonts() {
   useEffect(() => {
-    const id = 'se-gf';
-    if (document.getElementById(id)) return;
+    if (document.getElementById('se-gf')) return;
     const l = document.createElement('link');
-    l.id = id; l.rel = 'stylesheet';
+    l.id = 'se-gf'; l.rel = 'stylesheet';
     l.href = 'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;0,700;1,300;1,400&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@300;400;500&display=swap';
     document.head.appendChild(l);
   }, []);
@@ -22,7 +22,7 @@ const PRESETS = {
   'Dividend':     'T,VZ,MO,PM,XOM,CVX,JNJ,KO,PEP,IBM',
 };
 
-const SIG_LABELS = ['EPS beat','PE vs hist','vs 50d MA','Insider','Analyst target','PE vs peers'];
+const SIG_LABELS = ['EPS beat','PE vs hist','vs 50d MA','Insider','Analyst','PE vs peers'];
 
 const US_SET = new Set('AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,JPM,XOM,UNH,LLY,AVGO,ORCL,AMD,INTC,QCOM,TXN,AMAT,MU,ADBE,BAC,WFC,GS,MS,BLK,C,AXP,SCHW,USB,PNC,TFC,JNJ,ABBV,MRK,PFE,TMO,ABT,AMGN,CVS,MDT,ISRG,COP,EOG,SLB,MPC,PSX,VLO,OXY,DVN,HAL,BKR,CVX,HD,MCD,NKE,SBUX,LOW,TGT,COST,WMT,T,VZ,MO,PM,KO,PEP,MMM,IBM,CAT,DE,GE,HON,RTX,LMT,NOW,CRM,PANW,INTU,CSCO,MA,V,BKNG,CME,SPGI,FCX,NEM,NEE,DUK,AMT,PLD,EQIX,CCI,SPG,NFLX,DIS,TMUS,CMCSA,F,GM'.split(','));
 
@@ -41,11 +41,11 @@ const C = {
 const FONTS = "'Cormorant Garamond','Georgia',serif";
 const SANS  = "'DM Sans','Helvetica Neue',sans-serif";
 const MONO  = "'DM Mono','Courier New',monospace";
-const RANK_LABELS = ['I','II','III','IV','V','VI','VII','VIII','IX'];
-const PAGE_SIZE   = 3;
-const TOTAL_PICKS = 9;
-const RESCAN_MS   = 5 * 60 * 1000;
-const TOTAL_BATCHES = 5; // matches top3.js BATCHES.length
+const RANK_LABELS   = ['I','II','III','IV','V','VI','VII','VIII','IX'];
+const PAGE_SIZE     = 3;
+const TOTAL_PICKS   = 9;
+const RESCAN_MS     = 5 * 60 * 1000;
+const TOTAL_BATCHES = 5;
 
 function scoreColor(sc, dark=false) {
   if (sc>=6) return dark?'#7EC87A':'#2D6E2A';
@@ -55,7 +55,7 @@ function scoreColor(sc, dark=false) {
   return dark?'rgba(154,152,144,0.55)':C.txLight;
 }
 function getRating(sc) {
-  if (sc>=5) return {label:'Strong Buy',color:'#166534',bg:'#dcfce7',border:'#86efac'};
+  if (sc>=5) return {label:'Strong Buy',color:'#14532d',bg:'#dcfce7',border:'#86efac'};
   if (sc===4) return {label:'Buy',color:'#15803d',bg:'#f0fdf4',border:'#bbf7d0'};
   if (sc===3) return {label:'Watch',color:'#92400e',bg:'#fffbeb',border:'#fde68a'};
   return {label:'Ignore',color:'#6b7280',bg:'#f9fafb',border:'#d1d5db'};
@@ -63,24 +63,32 @@ function getRating(sc) {
 
 function ScoreDots({score,max=6,dark=false}) {
   const fc=scoreColor(score,dark), er=dark?'rgba(95,94,86,0.45)':C.borderDk;
-  return <div style={{display:'flex',gap:4}}>{Array.from({length:max}).map((_,i)=><div key={i} style={{width:7,height:7,borderRadius:'50%',background:i<score?fc:'transparent',border:`1.5px solid ${i<score?fc:er}`,transition:'all 0.3s'}}/>)}</div>;
+  return (
+    <div style={{display:'flex',gap:4}}>
+      {Array.from({length:max}).map((_,i)=>(
+        <div key={i} style={{width:7,height:7,borderRadius:'50%',background:i<score?fc:'transparent',border:`1.5px solid ${i<score?fc:er}`,transition:'all 0.3s'}}/>
+      ))}
+    </div>
+  );
 }
 
-function SigPill({sig,label,dark=false,signalIndex,onRetry,loading=false}) {
-  // hasVal = true whenever the backend has sent ANY non-empty string
-  // Only show "tap to retry" when value is genuinely absent/blank
-  const EMPTY = ['', '--', null, undefined];
-  const hasVal = !loading && !EMPTY.includes(sig.value);
-  const p=sig.status==='pass', f=sig.status==='fail';
-  // neutral pills with a value get amber tones; only truly empty pills get dashed border
-  const isEmpty = !hasVal && !loading;
-  const bg  = isEmpty?(dark?C.dkAmberBg:C.amberBg):dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
-  const col = isEmpty?(dark?C.dkAmber:C.amber):dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
-  const bdc = isEmpty?(dark?C.dkAmberBd:C.amberBd):dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
-  const bd  = isEmpty?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
-  const clickable = isEmpty && !loading && onRetry;
+// KEY FIX: pill shows ANY non-empty string from the backend.
+// Only shows "retry" when value is genuinely absent (null, undefined, '').
+function SigPill({sig, label, dark=false, signalIndex, onRetry, loading=false}) {
+  const val = sig?.value;
+  const hasVal = !loading && val != null && val !== '';
+  const p = sig?.status === 'pass';
+  const f = sig?.status === 'fail';
+
+  const bg  = !hasVal?( dark?C.dkAmberBg:C.amberBg):dark?(p?C.dkGreenBg:f?C.dkRedBg:C.dkAmberBg):(p?C.greenBg:f?C.redBg:C.amberBg);
+  const col = !hasVal?(dark?C.dkAmber:C.amber):dark?(p?C.dkGreen:f?C.dkRed:C.dkAmber):(p?C.green:f?C.red:C.amber);
+  const bdc = !hasVal?(dark?C.dkAmberBd:C.amberBd):dark?(p?C.dkGreenBd:f?C.dkRedBd:C.dkAmberBd):(p?C.greenBd:f?C.redBd:C.amberBd);
+  const bd  = !hasVal?`0.5px dashed ${bdc}`:`0.5px solid ${bdc}`;
+  const clickable = !hasVal && !loading && onRetry;
+
   return (
-    <div onClick={clickable?()=>onRetry(signalIndex):undefined} title={clickable?`Retry ${label}`:undefined}
+    <div onClick={clickable?()=>onRetry(signalIndex):undefined}
+      title={clickable?`Retry ${label}`:undefined}
       style={{background:bg,border:bd,borderRadius:5,padding:'5px 7px',cursor:clickable?'pointer':'default'}}>
       <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:3}}>
         {loading
@@ -89,7 +97,7 @@ function SigPill({sig,label,dark=false,signalIndex,onRetry,loading=false}) {
         <div style={{fontSize:7.5,color:dark?'rgba(154,152,144,0.75)':C.txLight,fontFamily:SANS,textTransform:'uppercase',letterSpacing:'0.06em',lineHeight:1}}>{label}</div>
       </div>
       <div style={{fontSize:10,fontWeight:500,color:col,fontFamily:MONO,lineHeight:1.3,wordBreak:'break-word'}}>
-        {loading ? 'loading…' : hasVal ? sig.value : '— tap to retry'}
+        {loading ? 'loading…' : hasVal ? val : '— tap to retry'}
       </div>
     </div>
   );
@@ -114,7 +122,7 @@ function SkeletonCard() {
 
 function FeatureCard({stock,rank,onSignalRetry,isNew=false}) {
   if (!stock) return <SkeletonCard/>;
-  const sc=Math.min(stock.score||0,6),rating=getRating(sc);
+  const sc=Math.min(stock.score||0,6), rating=getRating(sc);
   const chgPos=stock.change?.startsWith('+');
   const exchange=stock.exchange||(US_SET.has(stock.ticker)?'NYSE':'INTL');
   return (
@@ -143,7 +151,7 @@ function FeatureCard({stock,rank,onSignalRetry,isNew=false}) {
       <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:5,marginBottom:14}}>
         {SIG_LABELS.map((label,i)=>{
           const sig=(stock.signals||[])[i]||{};
-          return <SigPill key={i} sig={{status:sig.status,value:sig.value}} label={label} dark signalIndex={i} loading={sig._loading||false} onRetry={onSignalRetry?(idx)=>onSignalRetry(stock.ticker,idx):undefined}/>;
+          return <SigPill key={i} sig={sig} label={label} dark signalIndex={i} loading={sig._loading||false} onRetry={onSignalRetry?(idx)=>onSignalRetry(stock.ticker,idx):undefined}/>;
         })}
       </div>
       <div style={{flex:1,minHeight:44,padding:'10px 12px',background:'rgba(241,239,232,0.04)',borderRadius:2,border:'0.5px solid rgba(184,160,112,0.2)'}}>
@@ -160,16 +168,26 @@ function ArrowBtn({dir,onClick,disabled}) {
   return (
     <button onClick={onClick} disabled={disabled}
       style={{width:40,height:40,borderRadius:'50%',background:disabled?'rgba(58,56,50,0.5)':C.deepBg,border:`1px solid ${disabled?'rgba(184,160,112,0.15)':C.gold}`,color:disabled?'rgba(184,160,112,0.2)':C.gold,display:'flex',alignItems:'center',justifyContent:'center',cursor:disabled?'not-allowed':'pointer',padding:0,flexShrink:0}}>
-      {dir==='left'?<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>:<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>}
+      {dir==='left'
+        ?<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6z"/></svg>
+        :<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>}
     </button>
   );
 }
+
 function PageDots({total,active,onChange}) {
-  return <div style={{display:'flex',gap:6,alignItems:'center'}}>{Array.from({length:total}).map((_,i)=><button key={i} onClick={()=>onChange(i)} style={{width:i===active?20:6,height:6,borderRadius:3,background:i===active?C.gold:'rgba(184,160,112,0.3)',border:'none',padding:0,cursor:'pointer',transition:'all 0.25s ease'}}/>)}</div>;
+  return (
+    <div style={{display:'flex',gap:6,alignItems:'center'}}>
+      {Array.from({length:total}).map((_,i)=>(
+        <button key={i} onClick={()=>onChange(i)}
+          style={{width:i===active?20:6,height:6,borderRadius:3,background:i===active?C.gold:'rgba(184,160,112,0.3)',border:'none',padding:0,cursor:'pointer',transition:'all 0.25s ease'}}/>
+      ))}
+    </div>
+  );
 }
 
 function ResultCard({stock,rank,onSignalRetry}) {
-  const sc=Math.min(stock.score||0,6),rating=getRating(sc);
+  const sc=Math.min(stock.score||0,6), rating=getRating(sc);
   const chgPos=stock.change?.startsWith('+');
   const accentL=sc>=5?C.gold:sc>=4?C.greenBd:sc>=3?C.amberBd:C.borderDk;
   const rnk=rank===1?{bg:C.gold,color:'#2C2C2A'}:rank===2?{bg:C.accent,color:'#F1EFE8'}:rank===3?{bg:C.accentDk,color:'#F1EFE8'}:{bg:C.border,color:C.txMid};
@@ -200,7 +218,7 @@ function ResultCard({stock,rank,onSignalRetry}) {
       <div style={{display:'grid',gridTemplateColumns:'repeat(6,1fr)',gap:4,marginBottom:8}}>
         {SIG_LABELS.map((label,i)=>{
           const sig=(stock.signals||[])[i]||{};
-          return <SigPill key={i} sig={{status:sig.status,value:sig.value}} label={label} signalIndex={i} loading={sig._loading||false} onRetry={onSignalRetry?(idx)=>onSignalRetry(stock.ticker,idx):undefined}/>;
+          return <SigPill key={i} sig={sig} label={label} signalIndex={i} loading={sig._loading||false} onRetry={onSignalRetry?(idx)=>onSignalRetry(stock.ticker,idx):undefined}/>;
         })}
       </div>
       {stock.summary&&<div style={{fontSize:11,color:C.txMid,borderTop:`0.5px solid ${C.border}`,paddingTop:8,lineHeight:1.55,fontFamily:SANS}}>
@@ -211,33 +229,27 @@ function ResultCard({stock,rank,onSignalRetry}) {
   );
 }
 
-// ── Batch progress bar ────────────────────────────────────────────────────────
-function BatchProgress({completed,total,scanning}) {
-  const pct = total > 0 ? Math.round((completed/total)*100) : 0;
+function BatchProgress({completed,total}) {
+  const pct=total>0?Math.round((completed/total)*100):0;
   return (
-    <div style={{display:'flex',alignItems:'center',gap:8}}>
+    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16}}>
       <div style={{flex:1,height:2,background:'rgba(95,94,86,0.2)',borderRadius:1,overflow:'hidden'}}>
-        <div style={{height:'100%',width:`${pct}%`,background:C.gold,transition:'width 0.4s ease',borderRadius:1}}/>
+        <div style={{height:'100%',width:`${pct}%`,background:C.gold,transition:'width 0.5s ease',borderRadius:1}}/>
       </div>
-      <span style={{fontSize:9,color:C.txLight,fontFamily:MONO,whiteSpace:'nowrap',minWidth:60}}>
-        {scanning?`batch ${completed}/${total}`:`${pct}% scanned`}
+      <span style={{fontSize:9,color:C.txLight,fontFamily:MONO,whiteSpace:'nowrap',minWidth:56}}>
+        {pct < 100 ? `${pct}% scanned` : '100% scanned'}
       </span>
     </div>
   );
 }
 
 async function callAnalyse(tickers) {
-  const res = await fetch('/api/analyse', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({tickers}),
-  });
+  const res = await fetch('/api/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickers})});
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
-
-async function fetchBatch(batchIndex, refresh=false) {
-  const url = `/api/top3?batch=${batchIndex}${refresh?'&refresh=1':''}`;
-  const res = await fetch(url);
+async function fetchBatch(idx, refresh=false) {
+  const res = await fetch(`/api/top3?batch=${idx}${refresh?'&refresh=1':''}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -255,29 +267,29 @@ export default function Home() {
   const [topPicks,setTopPicks]         = useState(Array(TOTAL_PICKS).fill(null));
   const [topStatus,setTopStatus]       = useState('Loading megacaps…');
   const [batchesCompleted,setBatchesCompleted] = useState(0);
-  const [batchScanning,setBatchScanning] = useState(false);
-  const [newlyPromoted,setNewlyPromoted]= useState(new Set());
+  const [batchScanning,setBatchScanning]       = useState(true);
+  const [newlyPromoted,setNewlyPromoted]       = useState(new Set());
   const [carouselPage,setCarouselPage] = useState(0);
-  const [transitioning,setTransitioning]=useState(false);
-  const [animPhase,setAnimPhase]       = useState('idle');
-  const [rescanCountdown,setRescanCountdown]= useState('');
+  const [transitioning,setTransitioning] = useState(false);
+  const [animPhase,setAnimPhase]         = useState('idle');
+  const [rescanCountdown,setRescanCountdown] = useState('');
 
   const timerRef       = useRef(null);
   const rescanTimerRef = useRef(null);
   const rescanStartRef = useRef(Date.now());
   const tickersRef     = useRef([]);
   const allStocksRef   = useRef(new Map());
-  const totalPages = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
+  const totalPages     = Math.ceil(TOTAL_PICKS / PAGE_SIZE);
 
   const recomputeTopPicks = useCallback((promoted=new Set())=>{
-    const all = Array.from(allStocksRef.current.values())
+    const all=Array.from(allStocksRef.current.values())
       .filter(s=>s&&!s.error&&s.score!=null)
       .sort((a,b)=>{const sd=(b.score||0)-(a.score||0);return sd!==0?sd:new Date(b.updatedAt||0)-new Date(a.updatedAt||0);});
     setTopPicks(Array(TOTAL_PICKS).fill(null).map((_,i)=>all[i]||null));
     if(promoted.size>0) setNewlyPromoted(promoted);
   },[]);
 
-  const mergeIntoPool = useCallback((stockMap,source,promoted=new Set())=>{
+  const mergePool = useCallback((stockMap,source,promoted=new Set())=>{
     for(const [ticker,stock] of Object.entries(stockMap)){
       if(!stock||stock.error) continue;
       const ex=allStocksRef.current.get(ticker);
@@ -286,7 +298,7 @@ export default function Home() {
     recomputeTopPicks(promoted);
   },[recomputeTopPicks]);
 
-  const updateStockInPool = useCallback((ticker,updater)=>{
+  const updatePool = useCallback((ticker,updater)=>{
     const ex=allStocksRef.current.get(ticker);
     if(ex){allStocksRef.current.set(ticker,updater(ex));recomputeTopPicks();}
   },[recomputeTopPicks]);
@@ -305,98 +317,54 @@ export default function Home() {
     window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);
   },[nextPage,prevPage]);
 
-  // ── Run one batch: fetch quick scores → pick top candidates → analyse ──────
-  const runBatch = useCallback(async(batchIndex, isBackground=false, refresh=false)=>{
+  const runBatch = useCallback(async(batchIndex,isBackground=false,refresh=false)=>{
     try {
-      const batchData = await fetchBatch(batchIndex, refresh);
-      const { candidates=[], stockMeta={}, allScored=[], totalUniverse } = batchData;
+      const batchData = await fetchBatch(batchIndex,refresh);
+      const {candidates=[],stockMeta={},allScored=[]} = batchData;
       if (!candidates.length) return;
-
-      // Check which candidates are new or have a better quickScore than what's in pool
       const pool = allStocksRef.current;
-      const newCandidates = isBackground
-        ? candidates.filter(t => {
-            const ex = pool.get(t);
-            const qs = (allScored||[]).find(s=>s.symbol===t)?.qs||0;
-            return !ex || qs > (ex._qs||0);
-          }).slice(0, 10) // limit background analysis to 10 per batch
-        : candidates; // first batch always analyses all
-
-      if (!newCandidates.length) return;
-
-      const data = await callAnalyse(newCandidates);
-      const currentTop9 = Array.from(pool.values())
-        .filter(s=>s&&!s.error&&s.score!=null)
-        .sort((a,b)=>(b.score||0)-(a.score||0))
-        .slice(0, TOTAL_PICKS);
-      const worstScore = currentTop9.length >= TOTAL_PICKS ? (currentTop9[TOTAL_PICKS-1]?.score||0) : 0;
-
+      const toAnalyse = isBackground
+        ? candidates.filter(t=>{const ex=pool.get(t);const qs=(allScored||[]).find(s=>s.symbol===t)?.qs||0;return !ex||qs>(ex._qs||0);}).slice(0,10)
+        : candidates;
+      if (!toAnalyse.length) return;
+      const data = await callAnalyse(toAnalyse);
+      const top9 = Array.from(pool.values()).filter(s=>s&&!s.error&&s.score!=null).sort((a,b)=>(b.score||0)-(a.score||0)).slice(0,TOTAL_PICKS);
+      const worstScore = top9.length>=TOTAL_PICKS?(top9[TOTAL_PICKS-1]?.score||0):0;
       const promoted = new Set();
-      for (const [ticker,stock] of Object.entries(data.results||{})) {
-        if (!stock||stock.error) continue;
-        const qs = (allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
-        const exchange = (stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL') ? stock.exchange : (stockMeta[ticker]?.exchange||stock.exchange);
-        const enriched = {...stock, exchange, _qs:qs, _source:'auto'};
-        if (isBackground && (stock.score||0) > worstScore) promoted.add(ticker);
-        pool.set(ticker, enriched);
+      for(const [ticker,stock] of Object.entries(data.results||{})){
+        if(!stock||stock.error) continue;
+        const qs=(allScored||[]).find(s=>s.symbol===ticker)?.qs||0;
+        const exchange=(stock.exchange&&stock.exchange!=='NYSE'&&stock.exchange!=='INTL')?stock.exchange:(stockMeta[ticker]?.exchange||stock.exchange);
+        pool.set(ticker,{...stock,exchange,_qs:qs,_source:'auto'});
+        if(isBackground&&(stock.score||0)>worstScore) promoted.add(ticker);
       }
       recomputeTopPicks(promoted);
-      return promoted;
-    } catch(_) { return new Set(); }
-  }, [recomputeTopPicks]);
+    } catch(_) {}
+  },[recomputeTopPicks]);
 
-  // ── Boot: batch 0 immediately, then batches 1-N in background ────────────
-  useEffect(()=>{
-    let live = true;
+  const runAllBatches = useCallback(async(refresh=false)=>{
     setBatchScanning(true);
-
-    (async()=>{
-      // Batch 0 — megacaps — runs immediately, results appear fast
-      setTopStatus('Loading megacaps…');
-      await runBatch(0, false);
-      if (!live) return;
-      setBatchesCompleted(1);
-      setTopStatus('Megacaps loaded · scanning remaining sectors…');
-
-      // Batches 1-N run sequentially in background
-      for (let i = 1; i < TOTAL_BATCHES; i++) {
-        if (!live) break;
-        await runBatch(i, true); // isBackground=true
-        if (!live) break;
-        setBatchesCompleted(i+1);
-        if (i === TOTAL_BATCHES-1) {
-          setTopStatus(`Full universe scanned · ${new Date().toLocaleTimeString()}`);
-          setBatchScanning(false);
-        } else {
-          setTopStatus(`Scanning sectors… (${i+1}/${TOTAL_BATCHES})`);
-        }
-        // Small pause between background batches to avoid rate limits
-        await new Promise(r => setTimeout(r, 500));
-      }
-    })();
-
-    // Re-scan every 5 minutes starting with batch 0 then background
-    rescanTimerRef.current = setInterval(async()=>{
-      if (!live) return;
-      setBatchScanning(true);
-      setTopStatus('Refreshing…');
-      await runBatch(0, false, true);
-      if (!live) return;
-      setBatchesCompleted(1);
-      for (let i = 1; i < TOTAL_BATCHES; i++) {
-        if (!live) break;
-        await runBatch(i, true, true);
-        if (!live) break;
-        setBatchesCompleted(i+1);
-        await new Promise(r => setTimeout(r, 500));
-      }
-      setTopStatus(`Refreshed · ${new Date().toLocaleTimeString()}`);
-      setBatchScanning(false);
-    }, RESCAN_MS);
-    rescanStartRef.current = Date.now();
-
-    return()=>{live=false;clearInterval(rescanTimerRef.current);};
+    setTopStatus('Loading megacaps…');
+    await runBatch(0,false,refresh);
+    setBatchesCompleted(1);
+    setTopStatus('Megacaps loaded · scanning remaining sectors…');
+    for(let i=1;i<TOTAL_BATCHES;i++){
+      await runBatch(i,true,refresh);
+      setBatchesCompleted(i+1);
+      if(i<TOTAL_BATCHES-1) setTopStatus(`Scanning sectors… (${i+1}/${TOTAL_BATCHES})`);
+      await new Promise(r=>setTimeout(r,400));
+    }
+    setTopStatus(`Full universe scanned · ${new Date().toLocaleTimeString()}`);
+    setBatchScanning(false);
   },[runBatch]);
+
+  useEffect(()=>{
+    let live=true;
+    runAllBatches();
+    rescanTimerRef.current=setInterval(()=>{if(live)runAllBatches(true);},RESCAN_MS);
+    rescanStartRef.current=Date.now();
+    return()=>{live=false;clearInterval(rescanTimerRef.current);};
+  },[runAllBatches]);
 
   useEffect(()=>{
     if(newlyPromoted.size===0) return;
@@ -414,30 +382,30 @@ export default function Home() {
   },[]);
 
   const retrySignal=useCallback(async(ticker,signalIndex)=>{
-    const markLoad=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:'No data'}))];sigs[signalIndex]={...(sigs[signalIndex]||{}),_loading:true};return{...s,signals:sigs};};
-    updateStockInPool(ticker,markLoad);setResults(prev=>prev.map(s=>s?.ticker===ticker?markLoad(s):s));
+    const mark=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:''}))];sigs[signalIndex]={...(sigs[signalIndex]||{}),_loading:true};return{...s,signals:sigs};};
+    updatePool(ticker,mark);setResults(prev=>prev.map(s=>s?.ticker===ticker?mark(s):s));
     try{
       const data=await callAnalyse([ticker]);
       const fresh=data?.results?.[ticker];
       const ns=fresh?.signals?.[signalIndex]||{status:'neutral',value:'No data'};
-      const apply=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:'No data'}))];sigs[signalIndex]={...ns,_loading:false};return{...s,signals:sigs,score:sigs.filter(x=>x.status==='pass').length};};
-      updateStockInPool(ticker,apply);setResults(prev=>prev.map(s=>s?.ticker===ticker?apply(s):s));
+      const apply=s=>{const sigs=[...(s.signals||Array(6).fill({status:'neutral',value:''}))];sigs[signalIndex]={...ns,_loading:false};return{...s,signals:sigs,score:sigs.filter(x=>x.status==='pass').length};};
+      updatePool(ticker,apply);setResults(prev=>prev.map(s=>s?.ticker===ticker?apply(s):s));
     }catch(_){
       const clear=s=>{const sigs=[...(s.signals||[])];if(sigs[signalIndex])sigs[signalIndex]={...sigs[signalIndex],_loading:false};return{...s,signals:sigs};};
-      updateStockInPool(ticker,clear);setResults(prev=>prev.map(s=>s?.ticker===ticker?clear(s):s));
+      updatePool(ticker,clear);setResults(prev=>prev.map(s=>s?.ticker===ticker?clear(s):s));
     }
-  },[updateStockInPool]);
+  },[updatePool]);
 
   const scan=useCallback(async(tickers)=>{
-    setScanning(true);setStatus(`Analysing ${tickers.length} securities…`);
+    setScanning(true);setStatus(`Analysing ${tickers.length} tickers…`);
     try{
       const data=await callAnalyse(tickers);
       const arr=Object.values(data.results||{}).filter(Boolean).sort((a,b)=>(b.score||0)-(a.score||0));
       setResults(arr);setUpdatedAt(new Date().toLocaleTimeString());setStatus('');
-      mergeIntoPool(data.results||{},'custom');
+      mergePool(data.results||{},'custom');
     }catch(e){setStatus(`Error: ${e.message}`);}
     finally{setScanning(false);}
-  },[mergeIntoPool]);
+  },[mergePool]);
 
   function runScan(){
     const tickers=input.split(/[\s,;]+/).map(t=>t.toUpperCase().trim()).filter(Boolean).slice(0,20);
@@ -490,7 +458,7 @@ export default function Home() {
           </div>
           <div style={{textAlign:'right',fontSize:10,color:C.txLight,fontFamily:MONO,lineHeight:1.8}}>
             <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'flex-end'}}>
-              <div style={{width:6,height:6,borderRadius:'50%',background:scanning||batchScanning?C.gold:allStocksRef.current.size?C.gold:C.txLight,animation:batchScanning?'shimmer 1.5s ease-in-out infinite':undefined}}/>
+              <div style={{width:6,height:6,borderRadius:'50%',background:batchScanning||scanning?C.gold:C.txLight}}/>
               <span style={{color:'#F1EFE8'}}>{scanning?'Scanning…':batchScanning?'Discovering…':'Ready'}</span>
             </div>
             {updatedAt&&<div>Updated {updatedAt}</div>}
@@ -508,9 +476,8 @@ export default function Home() {
             <div style={{height:'0.5px',flex:1,background:C.borderDk}}/>
             <div style={{fontSize:9.5,color:C.txLight,fontFamily:SANS,letterSpacing:'0.1em',textTransform:'uppercase',whiteSpace:'nowrap'}}>{topStatus}</div>
           </div>
-          <div style={{marginBottom:16}}>
-            <BatchProgress completed={batchesCompleted} total={TOTAL_BATCHES} scanning={batchScanning}/>
-          </div>
+
+          <BatchProgress completed={batchesCompleted} total={TOTAL_BATCHES}/>
 
           <div style={{position:'relative'}}>
             <div style={{position:'absolute',left:-20,top:'50%',transform:'translateY(-50%)',zIndex:10}}>
@@ -541,9 +508,10 @@ export default function Home() {
         <div style={{background:C.cardBg,border:`0.5px solid ${C.borderDk}`,padding:'20px',marginBottom:20}}>
           <div style={{display:'flex',gap:10,marginBottom:14}}>
             <input type="text" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter'&&runScan()}
-              placeholder="Enter ticker symbols: AAPL, MSFT, NVDA, TSM…"
+              placeholder="AAPL, MSFT, NVDA, TSM…"
               style={{flex:1,background:C.pageBg,border:`0.5px solid ${C.borderDk}`,padding:'10px 14px',fontSize:13,fontFamily:MONO,color:C.tx,borderRadius:0}}/>
-            <button onClick={runScan} disabled={scanning} style={{padding:'10px 24px',background:C.darkBg,color:'#F1EFE8',border:'none',fontSize:12,fontFamily:SANS,fontWeight:500,letterSpacing:'0.1em',textTransform:'uppercase'}}>
+            <button onClick={runScan} disabled={scanning}
+              style={{padding:'10px 24px',background:C.darkBg,color:'#F1EFE8',border:'none',fontSize:12,fontFamily:SANS,fontWeight:500,letterSpacing:'0.1em',textTransform:'uppercase'}}>
               {scanning?'Scanning…':'Scan'}
             </button>
             {results.length>0&&<>
@@ -555,7 +523,8 @@ export default function Home() {
             <span style={{fontSize:9,color:C.txLight,fontFamily:SANS,letterSpacing:'0.12em',textTransform:'uppercase',marginRight:4}}>Sectors</span>
             {Object.keys(PRESETS).map(name=>{
               const active=activePreset===name;
-              return <button key={name} onClick={()=>{setInput(PRESETS[name]);setActivePreset(name);}} style={{padding:'4px 12px',fontSize:10,fontFamily:SANS,letterSpacing:'0.06em',background:active?C.darkBg:'transparent',color:active?'#F1EFE8':C.txMid,border:`0.5px solid ${active?C.darkBg:C.borderDk}`,borderRadius:0,whiteSpace:'nowrap'}}>{name}</button>;
+              return <button key={name} onClick={()=>{setInput(PRESETS[name]);setActivePreset(name);}}
+                style={{padding:'4px 12px',fontSize:10,fontFamily:SANS,letterSpacing:'0.06em',background:active?C.darkBg:'transparent',color:active?'#F1EFE8':C.txMid,border:`0.5px solid ${active?C.darkBg:C.borderDk}`,borderRadius:0,whiteSpace:'nowrap'}}>{name}</button>;
             })}
           </div>
         </div>
@@ -564,7 +533,8 @@ export default function Home() {
           <span style={{fontSize:9,color:C.txLight,fontFamily:SANS,letterSpacing:'0.12em',textTransform:'uppercase',marginRight:4}}>Filter</span>
           {[['all','All'],['strong','Strong 5–6'],['mod','Moderate 3–4'],['weak','Weak 0–2'],['us','US'],['intl','International']].map(([k,l])=>{
             const active=filter===k;
-            return <button key={k} onClick={()=>setFilter(k)} style={{padding:'4px 12px',fontSize:10,fontFamily:SANS,letterSpacing:'0.06em',background:active?C.accentDk:'transparent',color:active?'#F1EFE8':C.txMid,border:`0.5px solid ${active?C.accentDk:C.borderDk}`,borderRadius:0}}>{l}</button>;
+            return <button key={k} onClick={()=>setFilter(k)}
+              style={{padding:'4px 12px',fontSize:10,fontFamily:SANS,letterSpacing:'0.06em',background:active?C.accentDk:'transparent',color:active?'#F1EFE8':C.txMid,border:`0.5px solid ${active?C.accentDk:C.borderDk}`,borderRadius:0}}>{l}</button>;
           })}
         </div>
 
@@ -585,17 +555,17 @@ export default function Home() {
 
         {results.length>0&&(
           <div style={{display:'flex',gap:8,marginTop:24,paddingTop:20,borderTop:`0.5px solid ${C.borderDk}`,flexWrap:'wrap',alignItems:'center'}}>
-            <span style={{fontSize:10,color:C.txLight,fontFamily:MONO,flex:1,letterSpacing:'0.06em'}}>{filtered.length} securities ready to export</span>
+            <span style={{fontSize:10,color:C.txLight,fontFamily:MONO,flex:1,letterSpacing:'0.06em'}}>{filtered.length} securities · export</span>
             <button onClick={()=>{
               const hdr=['Rank','Ticker','Company','Score','Price','Change','MktCap','EPS beat','PE hist','vs50dMA','Insider','Analyst','PE vs peers','Summary'];
               const rows=filtered.map((r,i)=>{const g=r.signals||[];return[i+1,r.ticker,`"${(r.company||'').replace(/"/g,'""')}"`,r.score||0,r.price||'',r.change||'',r.marketCap||'',g[0]?.value||'',g[1]?.value||'',g[2]?.value||'',g[3]?.value||'',g[4]?.value||'',g[5]?.value||'',`"${(r.summary||'').replace(/"/g,'""')}"`].join(',');});
               const blob=new Blob([[hdr.join(',')].concat(rows).join('\n')],{type:'text/csv'});
               const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`signals_${new Date().toISOString().slice(0,10)}.csv`;a.click();
-            }} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:`0.5px solid ${C.borderDk}`,fontSize:11,fontFamily:SANS,letterSpacing:'0.06em'}}>Export CSV</button>
+            }} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:`0.5px solid ${C.borderDk}`,fontSize:11,fontFamily:SANS}}>CSV</button>
             <button onClick={()=>{
               const blob=new Blob([JSON.stringify(filtered.map((r,i)=>({rank:i+1,...r})),null,2)],{type:'application/json'});
               const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`signals_${new Date().toISOString().slice(0,10)}.json`;a.click();
-            }} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:`0.5px solid ${C.borderDk}`,fontSize:11,fontFamily:SANS,letterSpacing:'0.06em'}}>Export JSON</button>
+            }} style={{padding:'8px 18px',background:'transparent',color:C.txMid,border:`0.5px solid ${C.borderDk}`,fontSize:11,fontFamily:SANS}}>JSON</button>
           </div>
         )}
       </div>
